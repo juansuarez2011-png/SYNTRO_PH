@@ -6,3 +6,4 @@ numpy
 folium
 streamlit-folium
 simplekml
+python-docx
