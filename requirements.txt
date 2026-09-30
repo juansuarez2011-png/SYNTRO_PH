@@ -1,6 +1,8 @@
 streamlit
 pandas
-geopandas
-rasterio
-shapely
 numpy
+geopandas
+shapely
+pydeck
+fiona
+pyogrio
