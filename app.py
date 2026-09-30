@@ -38,7 +38,7 @@ with col_title:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Función nativa para extraer coordenadas de archivos KML/GeoJSON
+# Función blindada para extraer coordenadas de archivos KML/GeoJSON
 def extraer_coordenadas_vector(file_path, filename):
     lats, lons = [], []
     ext = filename.lower()
@@ -50,22 +50,22 @@ def extraer_coordenadas_vector(file_path, filename):
                 for feat in data.get('features', []):
                     geom = feat.get('geometry', {})
                     coords = geom.get('coordinates', [])
-                    # Manejar Polygon o MultiPolygon
                     if geom.get('type') == 'Polygon':
                         for ring in coords:
                             for pt in ring:
-                                lons.append(pt[0])
-                                lats.append(pt[1])
+                                if len(pt) >= 2:
+                                    lons.append(float(pt[0]))
+                                    lats.append(float(pt[1]))
                     elif geom.get('type') == 'MultiPolygon':
                         for poly in coords:
                             for ring in poly:
                                 for pt in ring:
-                                    lons.append(pt[0])
-                                    lats.append(pt[1])
+                                    if len(pt) >= 2:
+                                        lons.append(float(pt[0]))
+                                        lats.append(float(pt[1]))
         elif ext.endswith('.kml'):
             tree = ET.parse(file_path)
             root = tree.getroot()
-            # Buscar etiquetas de coordenadas en KML de forma genérica
             for elem in root.iter():
                 if elem.tag.endswith('coordinates'):
                     text = elem.text
@@ -93,15 +93,16 @@ def extraer_coordenadas_vector(file_path, filename):
                                             lons.append(float(coords_sub[0]))
                                             lats.append(float(coords_sub[1]))
     except Exception as e:
-        st.error(f"Error leyendo la geometría: {e}")
+        st.warning(f"Advertencia al leer geometría vectorial: {e}. Se usarán coordenadas por defecto.")
         
     if not lats or not lons:
-        # Valores por defecto de respaldo (Zulia, Venezuela)
+        # Coordenadas de respaldo (Zulia, Venezuela)
         lats = [10.60, 10.70, 10.70, 10.60]
         lons = [-71.65, -71.65, -71.55, -71.55]
         
     bounds = [min(lons), min(lats), max(lons), max(lats)]
-    return bounds, lats, lons
+    poly_coords = list(zip(lats, lons))
+    return bounds, poly_coords
 
 # Panel lateral para controles
 st.sidebar.header("⚙️ Parámetros de Análisis")
@@ -133,7 +134,7 @@ if band_zip and vector_file:
                             b6_path = os.path.join(r, n)
                 
                 if not b5_path or not b6_path:
-                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP Landsat.")
+                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP Landsat. Verifica los nombres de los archivos.")
                     st.stop()
 
                 # 2. Procesar Vector de Área de Estudio
@@ -142,9 +143,7 @@ if band_zip and vector_file:
                 with open(vec_path, "wb") as f:
                     f.write(vector_file.read())
 
-                bounds, poly_lats, poly_lons = extraer_coordenadas_vector(vec_path, vec_filename)
-                center_lat = (bounds[1] + bounds[3]) / 2.0
-                center_lon = (bounds[0] + bounds[2]) / 2.0
+                bounds, poly_coords = extraer_coordenadas_vector(vec_path, vec_filename)
 
                 # 3. Procesamiento Radiométrico (Índice NDMI para pH)
                 img_b5 = Image.open(b5_path)
@@ -198,7 +197,7 @@ if band_zip and vector_file:
                 st.session_state['points_data'] = points_data
                 st.session_state['raster_output_path'] = raster_output_path
                 st.session_state['temp_dir'] = temp_dir
-                st.session_state['poly_coords'] = list(zip(poly_lats, poly_lons))
+                st.session_state['poly_coords'] = poly_coords
                 st.session_state['processed'] = True
 
                 c1, c2, c3 = int(np.sum(ph_cat == 1)), int(np.sum(ph_cat == 2)), int(np.sum(ph_cat == 3))
@@ -214,7 +213,7 @@ if band_zip and vector_file:
                 st.success("¡Modelo ejecutado correctamente para el área de estudio seleccionada!")
 
             except Exception as e:
-                st.error(f"Error en el procesamiento: {e}")
+                st.error(f"Error crítico en el procesamiento: {str(e)}")
 
     if st.session_state.get('processed', False):
         stats = st.session_state['stats']
@@ -239,7 +238,7 @@ if band_zip and vector_file:
         
         # Dibujar polígono del área
         folium.Polygon(
-            locations=poly_coords,
+            locations=[(p[0], p[1]) for p in poly_coords],
             color="#06b6d4",
             fill=True,
             fill_color="#06b6d4",
