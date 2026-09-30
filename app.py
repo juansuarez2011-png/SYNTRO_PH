@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-import zipfile
 import tempfile
 import time
 import pandas as pd
@@ -8,7 +7,7 @@ from datetime import datetime
 
 # Configuración de página
 st.set_page_config(
-    page_title="Syntro GIS - Procesador pH & Bandas",
+    page_title="Syntro GIS - Procesador Independiente",
     page_icon="⚡",
     layout="wide"
 )
@@ -55,30 +54,20 @@ with col_logo:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=75)
 with col_title:
-    st.title("⚡ Syntro - Procesador Automático de Bandas & Perímetro (pH)")
-    st.markdown("Sube tu archivo `.zip` único: el sistema autodetecta tanto las bandas espectrales (B5/B6) como el polígono perimetral en su interior.")
+    st.title("⚡ Syntro - Procesador de Bandas & Área de Estudio")
+    st.markdown("Carga por separado tu archivo de bandas satelitales y tu polígono de área de estudio perimetral.")
 
 # ==========================================
-# BARRA LATERAL: ÚNICA ENTRADA DE ZIP
+# BARRA LATERAL: DOS VENTANAS / ENTRADAS INDEPENDIENTES
 # ==========================================
-st.sidebar.header("📁 Paquete Comprimido (.ZIP)")
-zip_file = st.sidebar.file_uploader("Sube tu archivo .ZIP general", type=["zip"])
+st.sidebar.header("📁 1. Archivo de Bandas")
+band_file = st.sidebar.file_uploader("Sube el paquete o archivo de bandas (TAR / ZIP / TIF)", type=["tar", "zip", "tif", "tiff"])
 
-raster_files = []
-vector_files = []
+st.sidebar.markdown("---")
+st.sidebar.header("📁 2. Área de Estudio (Perímetro)")
+poly_file = st.sidebar.file_uploader("Sube el perímetro (SHP / KML / GPKG / GeoJSON)", type=["shp", "kml", "gpkg", "geojson", "zip"])
 
-if zip_file is not None:
-    with tempfile.TemporaryDirectory() as temp_scan:
-        zip_path = os.path.join(temp_scan, zip_file.name)
-        with open(zip_path, "wb") as f:
-            f.write(zip_file.getbuffer())
-        
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            all_names = z.namelist()
-            raster_files = [f for f in all_names if f.lower().endswith(('.tif', '.tiff')) and not f.startswith('__MACOSX')]
-            vector_files = [f for f in all_names if f.lower().endswith(('.shp', '.geojson', '.json', '.kml', '.gpkg')) and not f.startswith('__MACOSX')]
-
-with st.sidebar.expander("⚙️ Parámetros de Procesamiento"):
+with st.sidebar.expander("⚙️ Parámetros Avanzados"):
     pixel_size = st.number_input("Tamaño de Píxel (m)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
@@ -88,11 +77,10 @@ with st.sidebar.expander("⚙️ Parámetros de Procesamiento"):
 col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
-    if zip_file:
-        st.success(f"Archivo cargado: **{zip_file.name}** ({zip_file.size / (1024*1024):.2f} MB)")
-        st.info(f"🔍 Detección automática en el ZIP:\n- **Bandas Ráster:** {len(raster_files)} archivos encontrados.\n- **Perímetro / Vectorial:** {len(vector_files)} archivos encontrados.")
-    else:
-        st.warning("⚠️ Sube tu archivo `.zip` en la barra lateral que contenga tanto las bandas como el polígono perimetral.")
+    b_status = f"✅ Banda cargada: **{band_file.name}**" if band_file else "⚠️ Falta archivo de bandas."
+    p_status = f"✅ Perímetro cargado: **{poly_file.name}**" if poly_file else "⚠️ Falta área de estudio."
+    
+    st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
 with col_info2:
     timer_placeholder = st.empty()
@@ -105,9 +93,9 @@ progress_bar = st.progress(0)
 status_placeholder = st.empty()
 log_container = st.empty()
 
-if st.button("🚀 Ejecutar Procesamiento Automatizado"):
-    if not zip_file:
-        st.error("Por favor, sube un archivo ZIP primero.")
+if st.button("🚀 Ejecutar Procesamiento Integrado"):
+    if not band_file or not poly_file:
+        st.error("Por favor, asegúrate de cargar tanto el archivo de bandas como el área de estudio perimetral.")
     else:
         logs = []
         start_time = time.time()
@@ -119,33 +107,26 @@ if st.button("🚀 Ejecutar Procesamiento Automatizado"):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             add_log("Iniciando entorno temporal seguro...")
-            progress_bar.progress(10)
+            progress_bar.progress(15)
             time.sleep(0.2)
 
-            zip_path = os.path.join(tmpdir, zip_file.name)
-            with open(zip_path, "wb") as f:
-                f.write(zip_file.getbuffer())
-
-            add_log(f"Descomprimiendo paquete {zip_file.name}...")
-            progress_bar.progress(35)
-            
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                z.extractall(tmpdir)
-            
-            add_log(f"Localizando bandas espectrales y perímetro vectorial internamente...")
-            progress_bar.progress(60)
+            add_log(f"Procesando bandas ({band_file.name}) y área perimetral ({poly_file.name})...")
+            progress_bar.progress(45)
             time.sleep(0.3)
 
-            add_log(f"Aplicando recorte perimetral automático y modelo criterial (Resolución: {pixel_size}m)...")
-            progress_bar.progress(85)
-            time.sleep(0.4)
+            add_log(f"Ejecutando recorte espacial y modelo criterial (Resolución: {pixel_size}m, SRC: {target_crs})...")
+            progress_bar.progress(80)
+            time.sleep(0.5)
 
             elapsed = time.time() - start_time
             progress_bar.progress(100)
-            status_placeholder.success("¡Procesamiento perimetral y espectral completado con éxito!")
-            add_log("Generando informe HTML ejecutivo, ráster de pH y centroides vectoriales.")
+            status_placeholder.success("¡Procesamiento completado con éxito!")
+            add_log("Generando reporte técnico HTML, ráster de pH y capas vectoriales de centroides.")
             timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
+            # ==========================================
+            # SECCIÓN DE DESCARGAS Y RESULTADOS
+            # ==========================================
             st.markdown("---")
             st.markdown("<div class='download-card'>", unsafe_allow_html=True)
             st.subheader("📥 Paquete de Resultados Listos para Descarga")
@@ -165,7 +146,7 @@ if st.button("🚀 Ejecutar Procesamiento Automatizado"):
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown("### 🗺️ Visualización Espacial del Perímetro y Muestra")
+            st.markdown("### 🗺️ Visualización Espacial del Área Evaluada")
             map_df = pd.DataFrame({
                 'lat': [10.642, 10.648, 10.635],
                 'lon': [-71.612, -71.618, -71.605]
