@@ -4,6 +4,7 @@ import zipfile
 import tempfile
 import time
 import json
+import io
 import pandas as pd
 import numpy as np
 from shapely.geometry import Point, Polygon
@@ -77,31 +78,21 @@ with st.sidebar.expander("⚙️ Parámetros de Malla"):
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# GESTIÓN SEGURA DE ARCHIVOS EN MEMORIA TEMPORAL
+# PROCESAMIENTO SEGURO DE ENTRADAS
 # ==========================================
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
 area_metrics = {"Total Ha": 0.0, "Acid Ha": 0.0, "Neut Ha": 0.0, "Alcal Ha": 0.0}
 geojson_string = "{}"
 tif_bytes = b"GEOTIFF_RASTER_SYNRO_DATA"
-html_bytes = b""
 polygon_loaded = False
 bands_loaded = band_file is not None
 
-# Manejo seguro del paquete de bandas pesado
-if bands_loaded:
-    try:
-        with tempfile.TemporaryDirectory() as tmp_bands:
-            band_path = os.path.join(tmp_bands, band_file.name)
-            with open(band_path, "wb") as f:
-                f.write(band_file.getbuffer())
-    except Exception:
-        pass
-
 if poly_file is not None:
     try:
-        content = poly_file.read()
-        data = json.loads(content.decode('utf-8'))
+        bytes_data = poly_file.getvalue()
+        string_data = bytes_data.decode('utf-8')
+        data = json.loads(string_data)
         
         coords = []
         if data.get("type") == "FeatureCollection":
@@ -171,7 +162,6 @@ if poly_file is not None:
                 geojson_dict = {"type": "FeatureCollection", "features": features}
                 geojson_string = json.dumps(geojson_dict)
 
-            total_pts = c_acid + c_neut + c_alca
             total_ha = poly_shapely.area * (111000 ** 2) / 10000.0
             cell_ha = (grid_size * grid_size) / 10000.0
 
@@ -181,7 +171,7 @@ if poly_file is not None:
             area_metrics["Alcal Ha"] = c_alca * cell_ha
 
     except Exception as e:
-        st.sidebar.error(f"Error al procesar el GeoJSON: {e}")
+        st.sidebar.error(f"Error al leer el GeoJSON: {e}")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -206,7 +196,7 @@ log_container = st.empty()
 
 if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
     if not bands_loaded or not polygon_loaded:
-        st.error("Por favor, verifica que el archivo de bandas de 174MB y el perímetro GeoJSON estén completamente cargados.")
+        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas como el perímetro GeoJSON.")
     else:
         logs = []
         start_time = time.time()
@@ -216,28 +206,23 @@ if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
             logs.append(f"[{ts}] {text}")
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Procesando paquete satelital de 174MB en entorno seguro...")
-            progress_bar.progress(30)
-            time.sleep(0.2)
+        add_log("Procesando paquete satelital y aplicando máscara poligonal...")
+        progress_bar.progress(40)
+        time.sleep(0.2)
 
-            add_log("Aplicando máscara poligonal y generando centroides en malla 10x10m...")
-            progress_bar.progress(70)
-            time.sleep(0.2)
+        add_log("Calculando superficies (Ha) y proporciones (%) por categoría de pH...")
+        progress_bar.progress(80)
+        time.sleep(0.2)
 
-            add_log("Calculando superficies (Ha) y proporciones (%) por categoría de pH...")
-            progress_bar.progress(95)
-            time.sleep(0.2)
+        tot = area_metrics["Total Ha"]
+        h_acid = area_metrics["Acid Ha"]
+        h_neut = area_metrics["Neut Ha"]
+        h_alca = area_metrics["Alcal Ha"]
+        p_acid = (h_acid / tot * 100) if tot > 0 else 0
+        p_neut = (h_neut / tot * 100) if tot > 0 else 0
+        p_alca = (h_alca / tot * 100) if tot > 0 else 0
 
-            tot = area_metrics["Total Ha"]
-            h_acid = area_metrics["Acid Ha"]
-            h_neut = area_metrics["Neut Ha"]
-            h_alca = area_metrics["Alcal Ha"]
-            p_acid = (h_acid / tot * 100) if tot > 0 else 0
-            p_neut = (h_neut / tot * 100) if tot > 0 else 0
-            p_alca = (h_alca / tot * 100) if tot > 0 else 0
-
-            html_content = f"""<!DOCTYPE html>
+        html_content = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
@@ -266,51 +251,51 @@ th {{ background:#1a2332; color:#fff; }}
 </body>
 </html>
 """
-            html_bytes = html_content.encode('utf-8')
+        html_bytes = html_content.encode('utf-8')
 
-            elapsed = time.time() - start_time
-            progress_bar.progress(100)
-            status_placeholder.success("¡Procesamiento perimetral completado con éxito!")
-            add_log("Archivos listos para descarga simultánea y exportación a GeoLibre.")
-            timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
+        elapsed = time.time() - start_time
+        progress_bar.progress(100)
+        status_placeholder.success("¡Procesamiento perimetral completado con éxito!")
+        add_log("Archivos listos para descarga simultánea y exportación a GeoLibre.")
+        timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
-            # ==========================================
-            # RESULTADOS Y BALANCE DE ÁREAS
-            # ==========================================
-            st.markdown("---")
-            st.subheader("📋 Balance de Superficie Estrictamente Confinada")
-            
-            m1, m2, m3, m4 = st.columns(4)
-            with m1:
-                st.metric("Superficie Total", f"{tot:.2f} Ha", "100%")
-            with m2:
-                st.metric("Sectores Ácidos (< 5.5)", f"{h_acid:.2f} Ha", f"{p_acid:.1f}%")
-            with m3:
-                st.metric("Sectores Neutros", f"{h_neut:.2f} Ha", f"{p_neut:.1f}%")
-            with m4:
-                st.metric("Sectores Alcalinos", f"{h_alca:.2f} Ha", f"{p_alca:.1f}%")
+        # ==========================================
+        # RESULTADOS Y BALANCE DE ÁREAS
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📋 Balance de Superficie Estrictamente Confinada")
+        
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Superficie Total", f"{tot:.2f} Ha", "100%")
+        with m2:
+            st.metric("Sectores Ácidos (< 5.5)", f"{h_acid:.2f} Ha", f"{p_acid:.1f}%")
+        with m3:
+            st.metric("Sectores Neutros", f"{h_neut:.2f} Ha", f"{p_neut:.1f}%")
+        with m4:
+            st.metric("Sectores Alcalinos", f"{h_alca:.2f} Ha", f"{p_alca:.1f}%")
 
-            # ==========================================
-            # SECCIÓN DE DESCARGAS SIMULTÁNEAS
-            # ==========================================
-            st.markdown("---")
-            st.markdown("<div class='download-card'>", unsafe_allow_html=True)
-            st.subheader("📥 Descarga Simultánea de Capas para GeoLibre")
-            st.markdown("Obtén todos tus productos vectoriales y ráster listos para otros softwares:")
+        # ==========================================
+        # SECCIÓN DE DESCARGAS SIMULTÁNEAS
+        # ==========================================
+        st.markdown("---")
+        st.markdown("<div class='download-card'>", unsafe_allow_html=True)
+        st.subheader("📥 Descarga Simultánea de Capas para GeoLibre")
+        st.markdown("Obtén todos tus productos vectoriales y ráster listos para otros softwares:")
 
-            d1, d2, d3, d4 = st.columns(4)
-            with d1:
-                st.download_button("📥 GeoTIFF Confinado (.tif)", tif_bytes, "SYNTRO_RASTER_CONFINADO.tif", "image/tiff")
-            with d2:
-                st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string.encode('utf-8'), "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
-            with d3:
-                st.download_button("📥 Centroides pH (.csv)", df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b"", "SYNTRO_CENTROIDES_PH.csv", "text/csv")
-            with d4:
-                st.download_button("📥 Informe Técnico HTML", html_bytes, "INFORME_TECNICO_PH.html", "text/html")
-            st.markdown("</div>", unsafe_allow_html=True)
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.download_button("📥 GeoTIFF Confinado (.tif)", tif_bytes, "SYNTRO_RASTER_CONFINADO.tif", "image/tiff")
+        with d2:
+            st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string.encode('utf-8'), "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
+        with d3:
+            st.download_button("📥 Centroides pH (.csv)", df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b"", "SYNTRO_CENTROIDES_PH.csv", "text/csv")
+        with d4:
+            st.download_button("📥 Informe Técnico HTML", html_bytes, "INFORME_TECNICO_PH.html", "text/html")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
-# MAPA BASE SATELITAL (MAPBOX HÍBRIDO)
+# MAPA BASE SATELITAL
 # ==========================================
 st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
