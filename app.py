@@ -12,6 +12,8 @@ import zipfile
 import simplekml
 import datetime
 from docx import Document
+from docx.shared import Inches
+from PIL import Image
 
 # Configuración de la página
 st.set_page_config(
@@ -20,12 +22,23 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown("""
-    <div style='background: linear-gradient(135deg, #1a2332, #0f172a); padding: 20px; border-radius: 12px; border-bottom: 4px solid #06b6d4; color: white; text-align: center;'>
-        <h2>Syntro Academy • Geotecnología y Análisis de Suelos</h2>
-        <h1 style='color: #06b6d4; font-size: 24px;'>MODELO ESPACIAL DE pH (CRITERIAL ESPECTRAL LANDSAT)</h1>
-    </div>
-<br>""", unsafe_allow_html=True)
+# Cabecera con Logotipo y Estilo
+col_logo, col_title = st.columns([1, 4])
+with col_logo:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=130)
+    else:
+        st.info("Coloca 'logo.png' en la carpeta del proyecto para visualizarlo.")
+
+with col_title:
+    st.markdown("""
+        <div style='background: linear-gradient(135deg, #1a2332, #0f172a); padding: 15px; border-radius: 12px; border-bottom: 4px solid #06b6d4; color: white;'>
+            <h2 style='margin:0; font-size: 20px;'>Syntro Academy • Geotecnología y Suelos</h2>
+            <h1 style='color: #06b6d4; font-size: 22px; margin:0;'>MODELO ESPACIAL DE pH (CRITERIO ESPECTRAL)</h1>
+        </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 # Panel lateral para controles
 st.sidebar.header("⚙️ Parámetros de Análisis")
@@ -35,7 +48,7 @@ pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0
 
 if band_zip and poly_file:
     if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
-        with st.spinner("Procesando bandas espectrales, recortando y generando centroides..."):
+        with st.spinner("Procesando bandas espectrales, calculando clases y generando entregables..."):
             temp_dir = tempfile.mkdtemp(prefix="syntro_streamlit_")
             
             try:
@@ -73,7 +86,6 @@ if band_zip and poly_file:
                 else:
                     gdf = gpd.read_file(poly_path)
 
-                # Reproyectar a UTM por defecto (ej: EPSG:32618)
                 target_crs = "EPSG:32618"
                 if gdf.crs != target_crs:
                     gdf = gdf.to_crs(target_crs)
@@ -86,6 +98,7 @@ if band_zip and poly_file:
                     out_image_b5, out_transform_b5 = rasterio.mask.mask(
                         src_b5, [geom_raster_crs], crop=True, nodata=-9999
                     )
+                    meta = src_b5.meta.copy()
 
                 with rasterio.open(b6_path) as src_b6:
                     out_image_b6, _ = rasterio.mask.mask(
@@ -95,7 +108,7 @@ if band_zip and poly_file:
                 arr_b5 = out_image_b5[0].astype(np.float32)
                 arr_b6 = out_image_b6[0].astype(np.float32)
 
-                # Cálculo de NDMI (B5 - B6) / (B5 + B6)
+                # Cálculo de NDMI
                 mask = (arr_b5 != -9999) & (arr_b6 != -9999) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
                 den = arr_b5 + arr_b6
                 ndmi_arr = np.full(arr_b5.shape, -9999.0, dtype=np.float32)
@@ -115,6 +128,20 @@ if band_zip and poly_file:
                 ph_cat[valid_data & (ndmi_arr <= p33)] = 1
                 ph_cat[valid_data & (ndmi_arr > p33) & (ndmi_arr <= p66)] = 2
                 ph_cat[valid_data & (ndmi_arr > p66)] = 3
+
+                # Guardar Ráster Clasificado de pH en GeoTIFF
+                raster_output_path = os.path.join(temp_dir, "mapa_ph_clasificado.tif")
+                meta.update({
+                    "driver": "GTiff",
+                    "height": ph_cat.shape[0],
+                    "width": ph_cat.shape[1],
+                    "transform": out_transform_b5,
+                    "count": 1,
+                    "dtype": "uint8",
+                    "nodata": 0
+                })
+                with rasterio.open(raster_output_path, "w", **meta) as dst:
+                    dst.write(ph_cat, 1)
 
                 # 4. Generación de Centroides Vectoriales
                 rows, cols = np.where(ph_cat > 0)
@@ -137,6 +164,7 @@ if band_zip and poly_file:
                 gdf_points = gpd.GeoDataFrame(points_data, crs=src_b5.crs)
                 
                 st.session_state['gdf_points'] = gdf_points
+                st.session_state['raster_output_path'] = raster_output_path
                 st.session_state['processed'] = True
 
                 # Estadísticas
@@ -162,6 +190,7 @@ if band_zip and poly_file:
     if st.session_state.get('processed', False):
         stats = st.session_state['stats']
         gdf_points = st.session_state['gdf_points']
+        raster_output_path = st.session_state['raster_output_path']
 
         st.markdown("### 📊 Resultados y Superficies de Suelos")
         col1, col2, col3, col4 = st.columns(4)
@@ -194,15 +223,17 @@ if band_zip and poly_file:
         st_folium(m, width=900, height=450)
 
         # Panel de Descargas y Reportes
-        st.markdown("### 📥 Panel de Descarga de Vectores e Informes Técnicos")
+        st.markdown("### 📥 Panel de Descarga de Archivos e Informes Técnicos")
         
         temp_out = tempfile.mkdtemp()
         
         # Generar Reporte Word (.docx)
         doc = Document()
+        if os.path.exists("logo.png"):
+            doc.add_picture("logo.png", width=Inches(1.5))
         doc.add_heading('Syntro Academy - Informe Técnico de Suelos', 0)
         doc.add_paragraph(f"Fecha de generación: {stats['fecha']}")
-        doc.add_paragraph("Modelo de Estimación Espacial de pH basado en Criterial Espectral de Sensores Remotos.")
+        doc.add_paragraph("Modelo de Estimación Espacial de pH basado en Criterio Espectral de Sensores Remotos.")
         
         doc.add_heading('Resumen de Superficies Evaluadas', level=1)
         doc.add_paragraph(f"• Superficie Total Analizada: {stats['total_ha']:.2f} Hectáreas")
@@ -213,19 +244,24 @@ if band_zip and poly_file:
         doc_path = os.path.join(temp_out, "Informe_Tecnico_pH.docx")
         doc.save(doc_path)
 
-        col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+        # Botones de descarga organizados en columnas
+        dcol1, dcol2, dcol3, dcol4, dcol5 = st.columns(5)
         
-        with col_d1:
+        with dcol1:
             with open(doc_path, "rb") as f:
-                st.download_button("📄 Descargar Informe Word", f, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                st.download_button("📄 Informe Word", f, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
-        with col_d2:
+        with dcol2:
+            with open(raster_output_path, "rb") as f:
+                st.download_button("🗺️ Ráster .TIF", f, file_name="mapa_ph_clasificado.tif", mime="image/tiff")
+
+        with dcol3:
             geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
             gdf_points.to_file(geojson_path, driver="GeoJSON")
             with open(geojson_path, "rb") as f:
-                st.download_button("📥 Descargar GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
+                st.download_button("📥 GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
 
-        with col_d3:
+        with dcol4:
             kml = simplekml.Kml()
             for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
                 pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
@@ -233,9 +269,9 @@ if band_zip and poly_file:
             kml_path = os.path.join(temp_out, "puntos_ph.kml")
             kml.save(kml_path)
             with open(kml_path, "rb") as f:
-                st.download_button("🌎 Descargar KML", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
+                st.download_button("🌎 KML Earth", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
 
-        with col_d4:
+        with dcol5:
             shp_dir = os.path.join(temp_out, "shapefile")
             os.makedirs(shp_dir, exist_ok=True)
             shp_path = os.path.join(shp_dir, "puntos_ph.shp")
@@ -248,7 +284,7 @@ if band_zip and poly_file:
                         zipf.write(os.path.join(root, file), file)
             
             with open(zip_shp_path, "rb") as f:
-                st.download_button("🗂 Descargar Shapefile", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
+                st.download_button("🗂 Shapefile .ZIP", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
 
 else:
-    st.info("👈 Por favor, carga tu archivo ZIP con las bandas recortadas (B5 y B6 en TIF) y tu perímetro vectorial para iniciar.")
+    st.info("👈 Por favor, carga tu archivo ZIP con las bandas recortadas (B5 y B6 en TIF) y tu perímetro vectorial en la barra lateral para iniciar.")
