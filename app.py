@@ -1,10 +1,8 @@
 import streamlit as st
 import os
-import zipfile
 import tempfile
 import time
 import json
-import io
 import pandas as pd
 import numpy as np
 from shapely.geometry import Point, Polygon
@@ -78,7 +76,7 @@ with st.sidebar.expander("⚙️ Parámetros de Malla"):
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# PROCESAMIENTO SEGURO DE ENTRADAS
+# PROCESAMIENTO SEGURO Y TOLERANTE A FALLOS
 # ==========================================
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
@@ -91,87 +89,94 @@ bands_loaded = band_file is not None
 if poly_file is not None:
     try:
         bytes_data = poly_file.getvalue()
-        string_data = bytes_data.decode('utf-8')
-        data = json.loads(string_data)
-        
-        coords = []
-        if data.get("type") == "FeatureCollection":
-            geom = data["features"][0]["geometry"]
-        elif data.get("type") == "Feature":
-            geom = data["geometry"]
-        else:
-            geom = data
-
-        if geom["type"] == "Polygon":
-            coords = geom["coordinates"][0]
-        elif geom["type"] == "MultiPolygon":
-            coords = geom["coordinates"][0][0]
-
-        if coords:
-            poly_shapely = Polygon(coords)
-            polygon_loaded = True
+        if len(bytes_data) > 0:
+            string_data = bytes_data.decode('utf-8', errors='ignore')
+            data = json.loads(string_data)
             
-            centroid = poly_shapely.centroid
-            center_lon, center_lat = centroid.x, centroid.y
+            coords = []
+            if data.get("type") == "FeatureCollection":
+                if data.get("features"):
+                    geom = data["features"][0].get("geometry", {})
+                    coords = geom.get("coordinates", [])
+            elif data.get("type") == "Feature":
+                geom = data.get("geometry", {})
+                coords = geom.get("coordinates", [])
+            else:
+                coords = data.get("coordinates", [])
 
-            minx, miny, maxx, maxy = poly_shapely.bounds
-            step_deg = grid_size / 111000.0 
-            
-            lons = np.arange(minx, maxx, step_deg)
-            lats = np.arange(miny, maxy, step_deg)
-            
-            pts_inside = []
-            np.random.seed(42)
-            c_acid, c_neut, c_alca = 0, 0, 0
-            
-            for lon in lons:
-                for lat in lats:
-                    pt = Point(lon, lat)
-                    if poly_shapely.contains(pt):
-                        ph_val = round(np.random.uniform(4.8, 8.2), 2)
-                        if ph_val < 5.5:
-                            color = [239, 68, 68, 200]
-                            clase = 1
-                            c_acid += 1
-                        elif ph_val <= 6.8:
-                            color = [16, 185, 129, 200]
-                            clase = 2
-                            c_neut += 1
-                        else:
-                            color = [59, 130, 246, 200]
-                            clase = 3
-                            c_alca += 1
-                            
-                        pts_inside.append({
-                            'lat': lat,
-                            'lon': lon,
-                            'ph': ph_val,
-                            'clase': clase,
-                            'color': color
-                        })
+            # Asegurar extracción correcta de coordenadas del polígono
+            if coords:
+                if geom.get("type") == "Polygon":
+                    poly_coords = coords[0]
+                elif geom.get("type") == "MultiPolygon":
+                    poly_coords = coords[0][0]
+                else:
+                    poly_coords = coords[0] if isinstance(coords, list) else []
 
-            if pts_inside:
-                df_points = pd.DataFrame(pts_inside)
-                features = []
-                for _, row in df_points.iterrows():
-                    features.append({
-                        "type": "Feature",
-                        "geometry": {"type": "Point", "coordinates": [row['lon'], row['lat']]},
-                        "properties": {"PH_VALOR": row['ph'], "PH_CLASE": row['clase']}
-                    })
-                geojson_dict = {"type": "FeatureCollection", "features": features}
-                geojson_string = json.dumps(geojson_dict)
+                if poly_coords:
+                    poly_shapely = Polygon(poly_coords)
+                    if poly_shapely.is_valid:
+                        polygon_loaded = True
+                        centroid = poly_shapely.centroid
+                        center_lon, center_lat = centroid.x, centroid.y
 
-            total_ha = poly_shapely.area * (111000 ** 2) / 10000.0
-            cell_ha = (grid_size * grid_size) / 10000.0
+                        minx, miny, maxx, maxy = poly_shapely.bounds
+                        step_deg = grid_size / 111000.0 
+                        
+                        lons = np.arange(minx, maxx, step_deg)
+                        lats = np.arange(miny, maxy, step_deg)
+                        
+                        pts_inside = []
+                        np.random.seed(42)
+                        c_acid, c_neut, c_alca = 0, 0, 0
+                        
+                        for lon in lons:
+                            for lat in lats:
+                                pt = Point(lon, lat)
+                                if poly_shapely.contains(pt):
+                                    ph_val = round(np.random.uniform(4.8, 8.2), 2)
+                                    if ph_val < 5.5:
+                                        color = [239, 68, 68, 200]
+                                        clase = 1
+                                        c_acid += 1
+                                    elif ph_val <= 6.8:
+                                        color = [16, 185, 129, 200]
+                                        clase = 2
+                                        c_neut += 1
+                                    else:
+                                        color = [59, 130, 246, 200]
+                                        clase = 3
+                                        c_alca += 1
+                                        
+                                    pts_inside.append({
+                                        'lat': lat,
+                                        'lon': lon,
+                                        'ph': ph_val,
+                                        'clase': clase,
+                                        'color': color
+                                    })
 
-            area_metrics["Total Ha"] = total_ha
-            area_metrics["Acid Ha"] = c_acid * cell_ha
-            area_metrics["Neut Ha"] = c_neut * cell_ha
-            area_metrics["Alcal Ha"] = c_alca * cell_ha
+                        if pts_inside:
+                            df_points = pd.DataFrame(pts_inside)
+                            features = []
+                            for _, row in df_points.iterrows():
+                                features.append({
+                                    "type": "Feature",
+                                    "geometry": {"type": "Point", "coordinates": [row['lon'], row['lat']]},
+                                    "properties": {"PH_VALOR": row['ph'], "PH_CLASE": row['clase']}
+                                })
+                            geojson_dict = {"type": "FeatureCollection", "features": features}
+                            geojson_string = json.dumps(geojson_dict)
 
+                        total_ha = poly_shapely.area * (111000 ** 2) / 10000.0
+                        cell_ha = (grid_size * grid_size) / 10000.0
+
+                        area_metrics["Total Ha"] = total_ha
+                        area_metrics["Acid Ha"] = c_acid * cell_ha
+                        area_metrics["Neut Ha"] = c_neut * cell_ha
+                        area_metrics["Alcal Ha"] = c_alca * cell_ha
     except Exception as e:
-        st.sidebar.error(f"Error al leer el GeoJSON: {e}")
+        st.sidebar.warning(f"Aviso de lectura perimetral: Asegúrate de que el archivo sea un GeoJSON válido.")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -180,7 +185,7 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     b_status = f"✅ Bandas listas: **{band_file.name}**" if bands_loaded else "⚠️ Falta paquete de bandas (174 MB)."
-    p_status = f"✅ Perímetro confinado: ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if polygon_loaded else "⚠️ Falta área de estudio GeoJSON."
+    p_status = f"✅ Perímetro confinado: ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if polygon_loaded else "⚠️ Falta área de estudio GeoJSON válida."
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
 with col_info2:
@@ -196,7 +201,7 @@ log_container = st.empty()
 
 if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
     if not bands_loaded or not polygon_loaded:
-        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas como el perímetro GeoJSON.")
+        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas como un archivo GeoJSON de perímetro válido.")
     else:
         logs = []
         start_time = time.time()
