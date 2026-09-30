@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import tempfile
 import numpy as np
-import zipfile
 import datetime
 from PIL import Image
 import folium
@@ -24,7 +23,7 @@ with col_logo:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=130)
     else:
-        st.info("Coloca 'logo.png' en la carpeta del proyecto.")
+        st.info("Coloca 'logo.png' en la carpeta.")
 
 with col_title:
     st.markdown("""
@@ -43,11 +42,11 @@ pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0
 
 if band_zip:
     if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
-        with st.spinner("Procesando bandas espectrales, calculando clases y generando entregables..."):
-            temp_dir = tempfile.mkdtemp(prefix="syntro_streamlit_")
+        with st.spinner("Procesando bandas espectrales y generando entregables..."):
+            temp_dir = tempfile.mkdtemp(prefix="syntro_")
             
             try:
-                # 1. Extraer el ZIP de las bandas
+                import zipfile
                 zip_path = os.path.join(temp_dir, band_zip.name)
                 with open(zip_path, "wb") as f:
                     f.write(band_zip.read())
@@ -65,21 +64,18 @@ if band_zip:
                             b6_path = os.path.join(r, n)
                 
                 if not b5_path or not b6_path:
-                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del archivo ZIP cargado.")
+                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP.")
                     st.stop()
 
-                # 2. Procesamiento con Pillow y NumPy (Sin dependencias de C++ externas)
                 img_b5 = Image.open(b5_path)
                 img_b6 = Image.open(b6_path)
                 
                 arr_b5 = np.array(img_b5, dtype=np.float32)
                 arr_b6 = np.array(img_b6, dtype=np.float32)
 
-                # Asegurar dimensiones iguales
                 if arr_b5.shape != arr_b6.shape:
                     arr_b6 = np.array(img_b6.resize((arr_b5.shape[1], arr_b5.shape[0])), dtype=np.float32)
 
-                # Cálculo de NDMI
                 mask = (arr_b5 != 0) & (arr_b6 != 0) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
                 den = arr_b5 + arr_b6
                 ndmi_arr = np.full(arr_b5.shape, -9999.0, dtype=np.float32)
@@ -87,10 +83,7 @@ if band_zip:
                 ndmi_arr[valid_den] = (arr_b5[valid_den] - arr_b6[valid_den]) / den[valid_den]
 
                 valid_data = valid_den & (ndmi_arr >= -1.0) & (ndmi_arr <= 1.0)
-                if not np.any(valid_data):
-                    st.error("No hay píxeles válidos en las imágenes evaluadas.")
-                    st.stop()
-
+                
                 ha_px = (pixel_size * pixel_size) / 10000.0
                 vals = ndmi_arr[valid_data]
                 p33, p66 = np.percentile(vals, 33), np.percentile(vals, 66)
@@ -100,50 +93,32 @@ if band_zip:
                 ph_cat[valid_data & (ndmi_arr > p33) & (ndmi_arr <= p66)] = 2
                 ph_cat[valid_data & (ndmi_arr > p66)] = 3
 
-                # Guardar Ráster Clasificado como imagen TIF con Pillow
                 raster_output_path = os.path.join(temp_dir, "mapa_ph_clasificado.tif")
-                # Mapear clases a colores visuales (1: Rojo, 2: Verde, 3: Azul)
                 color_palette = np.array([[0,0,0], [239,68,68], [34,197,94], [59,130,246]], dtype=np.uint8)
-                img_colored = color_palette[ph_cat]
-                img_out = Image.fromarray(img_colored, mode="RGB")
+                img_out = Image.fromarray(color_palette[ph_cat], mode="RGB")
                 img_out.save(raster_output_path)
 
-                # 3. Generación de puntos simulados para mapas y exportación vectorial
                 rows, cols = np.where(ph_cat > 0)
-                # Tomar una muestra representativa si hay demasiados píxeles para agilizar el navegador
-                if len(rows) > 1500:
-                    indices = np.random.choice(len(rows), 1500, replace=False)
+                if len(rows) > 800:
+                    indices = np.random.choice(len(rows), 800, replace=False)
                     rows, cols = rows[indices], cols[indices]
 
                 points_data = []
-                # Coordenadas base simuladas centradas (ej: región Zulia / Venezuela)
                 base_lat, base_lon = 10.65, -71.62
-                
                 for row, col in zip(rows, cols):
                     clase = int(ph_cat[row, col])
-                    # Simular coordenadas geográficas relativas al píxel
                     lat = base_lat + (row * 0.0001)
                     lon = base_lon + (col * 0.0001)
-                    
-                    nombre_clase_map = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
-                    
-                    points_data.append({
-                        "lat": lat,
-                        "lon": lon,
-                        "PH_CLASE": clase,
-                        "PH_NOMBRE": nombre_clase_map.get(clase, "N/D")
-                    })
+                    nombre_clase = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
+                    points_data.append({"lat": lat, "lon": lon, "PH_CLASE": clase, "PH_NOMBRE": nombre_clase.get(clase, "N/D")})
 
                 st.session_state['points_data'] = points_data
                 st.session_state['raster_output_path'] = raster_output_path
                 st.session_state['temp_dir'] = temp_dir
                 st.session_state['processed'] = True
 
-                # Estadísticas
-                c1 = int(np.sum(ph_cat == 1))
-                c2 = int(np.sum(ph_cat == 2))
-                c3 = int(np.sum(ph_cat == 3))
-                total_px = c1 + c2 + c3
+                c1, c2, c3 = int(np.sum(ph_cat == 1)), int(np.sum(ph_cat == 2)), int(np.sum(ph_cat == 3))
+                total_px = max(1, c1 + c2 + c3)
                 
                 st.session_state['stats'] = {
                     'h_acid': c1 * ha_px, 'p_acid': (c1 / total_px) * 100,
@@ -152,92 +127,69 @@ if band_zip:
                     'total_ha': (c1 + c2 + c3) * ha_px,
                     'fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
-                
-                st.success("¡Modelo ejecutado con éxito!")
+                st.success("¡Modelo ejecutado correctamente!")
 
             except Exception as e:
-                st.error(f"Ocurrió un error durante el procesamiento: {e}")
+                st.error(f"Error en el procesamiento: {e}")
 
-    # Mostrar resultados si ya se procesó
     if st.session_state.get('processed', False):
         stats = st.session_state['stats']
         points_data = st.session_state['points_data']
         raster_output_path = st.session_state['raster_output_path']
         temp_out = st.session_state.get('temp_dir', tempfile.mkdtemp())
 
-        st.markdown("### 📊 Resultados y Superficies de Suelos")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
-        col2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
-        col3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
-        col4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
+        st.markdown("### 📊 Resultados y Superficies")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
+        c2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
+        c3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
+        c4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
 
-        # Visualización en Folium
-        st.markdown("### 🗺️ Visor Geográfico de Puntos Estimados")
+        st.markdown("### 🗺️ Visor Geográfico")
         mean_lat = sum(p['lat'] for p in points_data) / len(points_data)
         mean_lon = sum(p['lon'] for p in points_data) / len(points_data)
         
-        m = folium.Map(location=[mean_lat, mean_lon], zoom_start=15)
+        m = folium.Map(location=[mean_lat, mean_lon], zoom_start=14)
         color_map = {1: "#ef4444", 2: "#22c55e", 3: "#3b82f6"}
-        
         for p in points_data:
             folium.CircleMarker(
-                location=[p['lat'], p['lon']],
-                radius=3,
+                location=[p['lat'], p['lon']], radius=3,
                 color=color_map.get(p['PH_CLASE'], "#333"),
-                fill=True,
-                fill_color=color_map.get(p['PH_CLASE'], "#333"),
-                fill_opacity=0.8,
+                fill=True, fill_color=color_map.get(p['PH_CLASE'], "#333"), fill_opacity=0.8,
                 popup=f"Clase: {p['PH_NOMBRE']}"
             ).add_to(m)
 
-        st_folium(m, width=900, height=450)
+        st_folium(m, width=900, height=400)
 
-        # Panel de Descargas y Reportes
-        st.markdown("### 📥 Panel de Descarga de Archivos e Informes Técnicos")
-        
-        # Generar Reporte Word (.docx)
+        # Generar Reportes y Descargas
         doc = Document()
         if os.path.exists("logo.png"):
             doc.add_picture("logo.png", width=Inches(1.5))
         doc.add_heading('Syntro Academy - Informe Técnico de Suelos', 0)
-        doc.add_paragraph(f"Fecha de generación: {stats['fecha']}")
-        doc.add_paragraph("Modelo de Estimación Espacial de pH basado en Criterio Espectral de Sensores Remotos.")
-        
-        doc.add_heading('Resumen de Superficies Evaluadas', level=1)
-        doc.add_paragraph(f"• Superficie Total Analizada: {stats['total_ha']:.2f} Hectáreas")
-        doc.add_paragraph(f"• Suelos Ácidos (< 5.5): {stats['h_acid']:.2f} Ha ({stats['p_acid']:.1f}%)")
-        doc.add_paragraph(f"• Suelos Neutros (5.5 - 6.8): {stats['h_neut']:.2f} Ha ({stats['p_neut']:.1f}%)")
-        doc.add_paragraph(f"• Suelos Alcalinos (> 6.8): {stats['h_alca']:.2f} Ha ({stats['p_alca']:.1f}%)")
-        
-        doc_path = os.path.join(temp_out, "Informe_Tecnico_pH.docx")
+        doc.add_paragraph(f"Fecha: {stats['fecha']}")
+        doc.add_heading('Superficies Evaluadas', level=1)
+        doc.add_paragraph(f"• Total: {stats['total_ha']:.2f} Ha\n• Ácido: {stats['h_acid']:.2f} Ha\n• Neutro: {stats['h_neut']:.2f} Ha\n• Alcalino: {stats['h_alca']:.2f} Ha")
+        doc_path = os.path.join(temp_out, "Informe_pH.docx")
         doc.save(doc_path)
 
-        # Generar KML para Google Earth
         kml_path = os.path.join(temp_out, "puntos_ph.kml")
         kml = simplekml.Kml()
         for p in points_data:
-            pnt = kml.newpoint(name=str(p['PH_NOMBRE']), coords=[(p['lon'], p['lat'])])
-            pnt.description = f"Clase de pH: {p['PH_NOMBRE']}"
+            kml.newpoint(name=str(p['PH_NOMBRE']), coords=[(p['lon'], p['lat'])])
         kml.save(kml_path)
 
-        # Botones de descarga
-        dcol1, dcol2, dcol3 = st.columns(3)
-        
-        with dcol1:
+        d1, d2, d3 = st.columns(3)
+        with d1:
             if os.path.exists(doc_path):
                 with open(doc_path, "rb") as f:
-                    st.download_button("📄 Informe Word", data=f.read(), file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-        with dcol2:
+                    st.download_button("📄 Informe Word", data=f.read(), file_name="Informe_pH_Syntro.docx")
+        with d2:
             if os.path.exists(raster_output_path):
                 with open(raster_output_path, "rb") as f:
-                    st.download_button("🗺 Ráster .TIF", data=f.read(), file_name="mapa_ph_clasificado.tif", mime="image/tiff")
-
-        with dcol3:
+                    st.download_button("🗺 Ráster .TIF", data=f.read(), file_name="mapa_ph.tif")
+        with d3:
             if os.path.exists(kml_path):
                 with open(kml_path, "rb") as f:
-                    st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
-
+                    st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_syntro.kml")
 else:
-    st.info("👈 Por favor, carga tu archivo ZIP con las bandas (B5 y B6 en TIF) en la barra lateral para iniciar el modelo.")
+    st.info("👈 Sube el archivo ZIP con tus bandas (B5 y B6 en formato TIF) en el panel izquierdo para comenzar.")
