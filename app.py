@@ -1,0 +1,234 @@
+import streamlit as st
+import os
+import tempfile
+import tarfile
+import datetime
+import numpy as np
+import rasterio
+from rasterio.warp import reproject, Resampling
+import geopandas as gpd
+from shapely.geometry import box, Point
+import folium
+from streamlit_folium import st_folium
+import zipfile
+import simplekml
+
+# Configuración de la página
+st.set_page_config(
+    page_title="Syntro Academy - Estimado de pH y Suelos",
+    page_icon="🌱",
+    layout="wide"
+)
+
+st.markdown("""
+    <div style='background: linear-gradient(135deg, #1a2332, #0f172a); padding: 20px; border-radius: 12px; border-bottom: 4px solid #06b6d4; color: white; text-align: center;'>
+        <h2>Syntro Academy • Geotecnología y Análisis de Suelos</h2>
+        <h1 style='color: #06b6d4; font-size: 24px;'>MODELO ESPACIAL DE pH (CRITERIAL ESPECTRAL LANDSAT 9)</h1>
+    </div>
+<br>""", unsafe_allow_html=True)
+
+# Panel lateral para controles
+st.sidebar.header("⚙️ Parámetros de Análisis")
+tar_file = st.sidebar.file_uploader("1. Seleccionar archivo Landsat 9 (.tar)", type=["tar"])
+poly_file = st.sidebar.file_uploader("2. Seleccionar Perímetro (GeoJSON o SHP en ZIP)", type=["geojson", "zip"])
+pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
+
+if tar_file and poly_file:
+    if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
+        with st.spinner("Procesando bandas espectrales y generando centroides..."):
+            temp_dir = tempfile.mkdtemp(prefix="syntro_streamlit_")
+            
+            try:
+                # 1. Guardar y extraer archivo .tar
+                tar_path = os.path.join(temp_dir, "input.tar")
+                with open(tar_path, "wb") as f:
+                    f.write(tar_file.read())
+                
+                with tarfile.open(tar_path, 'r:*') as tar:
+                    tar.extractall(path=temp_dir)
+                
+                b5_path, b6_path = None, None
+                for r, d, files in os.walk(temp_dir):
+                    for n in files:
+                        up = n.upper()
+                        if up.endswith(('_B5.TIF', '_B5.TIFF')) and 'QA' not in up:
+                            b5_path = os.path.join(r, n)
+                        elif up.endswith(('_B6.TIF', '_B6.TIFF')) and 'QA' not in up:
+                            b6_path = os.path.join(r, n)
+                
+                if not b5_path or not b6_path:
+                    st.error("No se encontraron las bandas B5 (NIR) y B6 (SWIR-1) dentro del archivo .tar.")
+                    st.stop()
+
+                # 2. Cargar Perímetro con Geopandas
+                poly_path = os.path.join(temp_dir, poly_file.name)
+                with open(poly_path, "wb") as f:
+                    f.write(poly_file.read())
+                
+                if poly_file.name.endswith('.zip'):
+                    with zipfile.ZipFile(poly_path, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+                    shp_files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.shp')]
+                    gdf = gpd.read_file(shp_files[0])
+                else:
+                    gdf = gpd.read_file(poly_path)
+
+                # Reproyectar a UTM si es necesario (ej: EPSG:32618)
+                target_crs = "EPSG:32618"
+                if gdf.crs != target_crs:
+                    gdf = gdf.to_crs(target_crs)
+
+                geom_union = gdf.unary_union
+
+                # 3. Recortar y procesar con Rasterio
+                with rasterio.open(b5_path) as src_b5:
+                    gdf_raster_crs = gdf.to_crs(src_b5.crs)
+                    geom_raster_crs = gdf_raster_crs.unary_union
+                    
+                    out_image_b5, out_transform_b5 = rasterio.mask.mask(
+                        src_b5, [geom_raster_crs], crop=True, nodata=-9999
+                    )
+
+                with rasterio.open(b6_path) as src_b6:
+                    out_image_b6, _ = rasterio.mask.mask(
+                        src_b6, [geom_raster_crs], crop=True, nodata=-9999
+                    )
+
+                arr_b5 = out_image_b5[0].astype(np.float32)
+                arr_b6 = out_image_b6[0].astype(np.float32)
+
+                # Cálculo de NDMI (B5 - B6) / (B5 + B6)
+                mask = (arr_b5 != -9999) & (arr_b6 != -9999) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
+                den = arr_b5 + arr_b6
+                ndmi_arr = np.full(arr_b5.shape, -9999.0, dtype=np.float32)
+                valid_den = mask & (den != 0)
+                ndmi_arr[valid_den] = (arr_b5[valid_den] - arr_b6[valid_den]) / den[valid_den]
+
+                valid_data = valid_den & (ndmi_arr >= -1.0) & (ndmi_arr <= 1.0)
+                if not np.any(valid_data):
+                    st.error("No hay píxeles válidos dentro del polígono.")
+                    st.stop()
+
+                ha_px = abs(out_transform_b5[0] * out_transform_b5[4]) / 10000.0
+                vals = ndmi_arr[valid_data]
+                p33, p66 = np.percentile(vals, 33), np.percentile(vals, 66)
+
+                ph_cat = np.zeros(ndmi_arr.shape, dtype=np.uint8)
+                ph_cat[valid_data & (ndmi_arr <= p33)] = 1
+                ph_cat[valid_data & (ndmi_arr > p33) & (ndmi_arr <= p66)] = 2
+                ph_cat[valid_data & (ndmi_arr > p66)] = 3
+
+                # 4. Generación de Centroides Vectoriales
+                rows, cols = np.where(ph_cat > 0)
+                points_data = []
+                
+                for row, col in zip(rows, cols):
+                    clase = int(ph_cat[row, col])
+                    x = out_transform_b5[2] + (col + 0.5) * out_transform_b5[0]
+                    y = out_transform_b5[5] + (row + 0.5) * out_transform_b5[4]
+                    pt = Point(x, y)
+                    
+                    nombre_clase_map = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
+                    
+                    points_data.append({
+                        "geometry": pt,
+                        "PH_CLASE": clase,
+                        "PH_NOMBRE": nombre_clase_map.get(clase, "N/D")
+                    })
+
+                gdf_points = gpd.GeoDataFrame(points_data, crs=src_b5.crs)
+                
+                st.session_state['gdf_points'] = gdf_points
+                st.session_state['processed'] = True
+
+                # Estadísticas
+                c1 = int(np.sum(ph_cat == 1))
+                c2 = int(np.sum(ph_cat == 2))
+                c3 = int(np.sum(ph_cat == 3))
+                total_px = c1 + c2 + c3
+                
+                st.session_state['stats'] = {
+                    'h_acid': c1 * ha_px, 'p_acid': (c1 / total_px) * 100,
+                    'h_neut': c2 * ha_px, 'p_neut': (c2 / total_px) * 100,
+                    'h_alca': c3 * ha_px, 'p_alca': (c3 / total_px) * 100,
+                    'total_ha': (c1 + c2 + c3) * ha_px
+                }
+                
+                st.success("¡Modelo ejecutado con éxito!")
+
+            except Exception as e:
+                st.error(f"Ocurrió un error durante el procesamiento: {e}")
+
+    # Mostrar resultados si ya se procesó
+    if st.session_state.get('processed', False):
+        stats = st.session_state['stats']
+        gdf_points = st.session_state['gdf_points']
+
+        st.markdown("### 📊 Resultados y Superficies")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
+        col2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
+        col3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
+        col4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
+
+        # Visualización en Folium
+        st.markdown("### 🗺️ Visor Geográfico de Puntos Estimados")
+        gdf_map = gdf_points.to_crs("EPSG:4326")
+        
+        if len(gdf_map) > 2000:
+            gdf_map = gdf_map.sample(2000)
+
+        m = folium.Map(location=[gdf_map.geometry.y.mean(), gdf_map.geometry.x.mean()], zoom_start=15)
+        
+        color_map = {1: "#ef4444", 2: "#22c55e", 3: "#3b82f6"}
+        for _, row in gdf_map.iterrows():
+            folium.CircleMarker(
+                location=[row.geometry.y, row.geometry.x],
+                radius=3,
+                color=color_map.get(row['PH_CLASE'], "#333"),
+                fill=True,
+                fill_color=color_map.get(row['PH_CLASE'], "#333"),
+                fill_opacity=0.8,
+                popup=f"Clase: {row['PH_NOMBRE']}"
+            ).add_to(m)
+
+        st_folium(m, width=900, height=450)
+
+        # Panel de Descargas (GeoJSON, KML, KMZ, Shapefile ZIP)
+        st.markdown("### 📥 Panel de Descarga de Puntos y Vectores")
+        
+        temp_out = tempfile.mkdtemp()
+        
+        # 1. GeoJSON
+        geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
+        gdf_points.to_file(geojson_path, driver="GeoJSON")
+        with open(geojson_path, "rb") as f:
+            st.download_button("📥 Descargar GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
+
+        # 2. KML
+        kml = simplekml.Kml()
+        for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
+            pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
+            pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
+        kml_path = os.path.join(temp_out, "puntos_ph.kml")
+        kml.save(kml_path)
+        with open(kml_path, "rb") as f:
+            st.download_button("🌎 Descargar KML (Google Earth)", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
+
+        # 3. Shapefile en ZIP
+        shp_dir = os.path.join(temp_out, "shapefile")
+        os.makedirs(shp_dir, exist_ok=True)
+        shp_path = os.path.join(shp_dir, "puntos_ph.shp")
+        gdf_points.to_file(shp_path, driver="ESRI Shapefile")
+        
+        zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
+        with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
+            for root, _, files in os.walk(shp_dir):
+                for file in files:
+                    zipf.write(os.path.join(root, file), file)
+        
+        with open(zip_shp_path, "rb") as f:
+            st.download_button("🗂️️ Descargar Shapefile (.ZIP)", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
+
+else:
+    st.info("👈 Por favor, carga tu archivo Landsat 9 en formato .tar y tu perímetro vectorial en la barra lateral para iniciar el procesamiento.")
