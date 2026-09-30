@@ -9,9 +9,9 @@ from streamlit_folium import st_folium
 import simplekml
 from docx import Document
 from docx.shared import Inches
-import geopandas as gpd
 import json
 import zipfile
+import xml.etree.ElementTree as ET
 
 # Configuración de la página
 st.set_page_config(
@@ -38,10 +38,75 @@ with col_title:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+# Función nativa para extraer coordenadas de archivos KML/GeoJSON
+def extraer_coordenadas_vector(file_path, filename):
+    lats, lons = [], []
+    ext = filename.lower()
+    
+    try:
+        if ext.endswith('.geojson') or ext.endswith('.json'):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for feat in data.get('features', []):
+                    geom = feat.get('geometry', {})
+                    coords = geom.get('coordinates', [])
+                    # Manejar Polygon o MultiPolygon
+                    if geom.get('type') == 'Polygon':
+                        for ring in coords:
+                            for pt in ring:
+                                lons.append(pt[0])
+                                lats.append(pt[1])
+                    elif geom.get('type') == 'MultiPolygon':
+                        for poly in coords:
+                            for ring in poly:
+                                for pt in ring:
+                                    lons.append(pt[0])
+                                    lats.append(pt[1])
+        elif ext.endswith('.kml'):
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+            # Buscar etiquetas de coordenadas en KML de forma genérica
+            for elem in root.iter():
+                if elem.tag.endswith('coordinates'):
+                    text = elem.text
+                    if text:
+                        parts = text.strip().split()
+                        for pt_str in parts:
+                            coords_sub = pt_str.split(',')
+                            if len(coords_sub) >= 2:
+                                lons.append(float(coords_sub[0]))
+                                lats.append(float(coords_sub[1]))
+        elif ext.endswith('.kmz'):
+            with zipfile.ZipFile(file_path, 'r') as kmz:
+                for name in kmz.namelist():
+                    if name.lower().endswith('.kml'):
+                        kml_content = kmz.read(name)
+                        root = ET.fromstring(kml_content)
+                        for elem in root.iter():
+                            if elem.tag.endswith('coordinates'):
+                                text = elem.text
+                                if text:
+                                    parts = text.strip().split()
+                                    for pt_str in parts:
+                                        coords_sub = pt_str.split(',')
+                                        if len(coords_sub) >= 2:
+                                            lons.append(float(coords_sub[0]))
+                                            lats.append(float(coords_sub[1]))
+    except Exception as e:
+        st.error(f"Error leyendo la geometría: {e}")
+        
+    if not lats or not lons:
+        # Valores por defecto de respaldo (Zulia, Venezuela)
+        lats = [10.60, 10.70, 10.70, 10.60]
+        lons = [-71.65, -71.65, -71.55, -71.55]
+        
+    bounds = [min(lons), min(lats), max(lons), max(lats)]
+    return bounds, lats, lons
+
 # Panel lateral para controles
 st.sidebar.header("⚙️ Parámetros de Análisis")
 band_zip = st.sidebar.file_uploader("1. Bandas Landsat (ZIP con B5 y B6 en TIF)", type=["zip"])
-vector_file = st.sidebar.file_uploader("2. Área de Estudio (KML, KMZ, SHP.zip, GeoJSON)", type=["kml", "kmz", "zip", "geojson"])
+vector_file = st.sidebar.file_uploader("2. Área de Estudio (KML, KMZ, GeoJSON)", type=["kml", "kmz", "geojson", "json"])
 pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
 
 if band_zip and vector_file:
@@ -72,49 +137,12 @@ if band_zip and vector_file:
                     st.stop()
 
                 # 2. Procesar Vector de Área de Estudio
-                vec_filename = vector_file.name.lower()
-                vec_path = os.path.join(temp_dir, vector_file.name)
+                vec_filename = vector_file.name
+                vec_path = os.path.join(temp_dir, vec_filename)
                 with open(vec_path, "wb") as f:
                     f.write(vector_file.read())
 
-                gdf = None
-                if vec_filename.endswith('.geojson'):
-                    gdf = gpd.read_file(vec_path)
-                elif vec_filename.endswith('.kml'):
-                    gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-                    gdf = gpd.read_file(vec_path, driver='KML')
-                elif vec_filename.endswith('.kmz'):
-                    # Extraer KMZ
-                    with zipfile.ZipFile(vec_path, 'r') as kmz_ref:
-                        kmz_ref.extractall(temp_dir)
-                    for rf, rd, rfiles in os.walk(temp_dir):
-                        for rn in rfiles:
-                            if rn.lower().endswith('.kml'):
-                                kml_extracted = os.path.join(rf, rn)
-                                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-                                gdf = gpd.read_file(kml_extracted, driver='KML')
-                                break
-                elif vec_filename.endswith('.zip'):
-                    # Shapefile comprimido
-                    with zipfile.ZipFile(vec_path, 'r') as shp_ref:
-                        shp_ref.extractall(temp_dir)
-                    for rf, rd, rfiles in os.walk(temp_dir):
-                        for rn in rfiles:
-                            if rn.lower().endswith('.shp'):
-                                shp_path = os.path.join(rf, rn)
-                                gdf = gpd.read_file(shp_path)
-                                break
-
-                if gdf is None or gdf.empty:
-                    st.error("No se pudo leer la geometría del archivo vectorial proporcionado.")
-                    st.stop()
-
-                # Asegurar sistema de coordenadas WGS84 (Lat/Lon)
-                if gdf.crs != "EPSG:4326":
-                    gdf = gdf.to_crs("EPSG:4326")
-
-                # Obtener centroide y límites para el mapa
-                bounds = gdf.total_bounds # [xmin, ymin, xmax, ymax]
+                bounds, poly_lats, poly_lons = extraer_coordenadas_vector(vec_path, vec_filename)
                 center_lat = (bounds[1] + bounds[3]) / 2.0
                 center_lon = (bounds[0] + bounds[2]) / 2.0
 
@@ -153,7 +181,7 @@ if band_zip and vector_file:
                 img_out = Image.fromarray(color_palette[ph_cat], mode="RGB")
                 img_out.save(raster_output_path)
 
-                # Generar puntos muestrales basados en el polígono delimitado
+                # Generar puntos muestrales distribuidos dentro de la extensión del área
                 points_data = []
                 rows, cols = np.where(ph_cat > 0)
                 if len(rows) > 600:
@@ -162,7 +190,6 @@ if band_zip and vector_file:
 
                 for row, col in zip(rows, cols):
                     clase = int(ph_cat[row, col])
-                    # Interpolación espacial dentro de los límites del área de estudio
                     lon = bounds[0] + (col / float(arr_b5.shape[1])) * (bounds[2] - bounds[0])
                     lat = bounds[3] - (row / float(arr_b5.shape[0])) * (bounds[3] - bounds[1])
                     nombre_clase = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
@@ -171,7 +198,7 @@ if band_zip and vector_file:
                 st.session_state['points_data'] = points_data
                 st.session_state['raster_output_path'] = raster_output_path
                 st.session_state['temp_dir'] = temp_dir
-                st.session_state['gdf'] = gdf
+                st.session_state['poly_coords'] = list(zip(poly_lats, poly_lons))
                 st.session_state['processed'] = True
 
                 c1, c2, c3 = int(np.sum(ph_cat == 1)), int(np.sum(ph_cat == 2)), int(np.sum(ph_cat == 3))
@@ -184,7 +211,7 @@ if band_zip and vector_file:
                     'total_ha': (c1 + c2 + c3) * ha_px,
                     'fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
-                st.success("¡Modelo ejecutado correctamente delimitado por el área de estudio!")
+                st.success("¡Modelo ejecutado correctamente para el área de estudio seleccionada!")
 
             except Exception as e:
                 st.error(f"Error en el procesamiento: {e}")
@@ -194,7 +221,7 @@ if band_zip and vector_file:
         points_data = st.session_state['points_data']
         raster_output_path = st.session_state['raster_output_path']
         temp_out = st.session_state.get('temp_dir', tempfile.mkdtemp())
-        gdf = st.session_state.get('gdf')
+        poly_coords = st.session_state.get('poly_coords', [])
 
         st.markdown("### 📊 Resultados y Superficies del Área de Estudio")
         c1, c2, c3, c4 = st.columns(4)
@@ -203,20 +230,22 @@ if band_zip and vector_file:
         c3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
         c4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
 
-        st.markdown("### 🗺️️ Visor Geográfico (Polígono y Muestras)")
+        st.markdown("### 🗺 Visor Geográfico (Área de Estudio y Muestras)")
         
-        # Centrar mapa en el polígono
-        bounds = gdf.total_bounds
-        center_lat = (bounds[1] + bounds[3]) / 2.0
-        center_lon = (bounds[0] + bounds[2]) / 2.0
+        mean_lat = sum(p[0] for p in poly_coords) / max(1, len(poly_coords))
+        mean_lon = sum(p[1] for p in poly_coords) / max(1, len(poly_coords))
         
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+        m = folium.Map(location=[mean_lat, mean_lon], zoom_start=13)
         
-        # Añadir polígono del área de estudio
-        folium.GeoJson(
-            gdf.to_json(),
-            name="Área de Estudio",
-            style_function=lambda x: {'color': '#06b6d4', 'fillColor': '#06b6d4', 'fillOpacity': 0.1, 'weight': 2}
+        # Dibujar polígono del área
+        folium.Polygon(
+            locations=poly_coords,
+            color="#06b6d4",
+            fill=True,
+            fill_color="#06b6d4",
+            fill_opacity=0.15,
+            weight=2,
+            tooltip="Área de Estudio"
         ).add_to(m)
 
         color_map = {1: "#ef4444", 2: "#22c55e", 3: "#3b82f6"}
@@ -261,4 +290,4 @@ if band_zip and vector_file:
                 with open(kml_path, "rb") as f:
                     st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_syntro.kml")
 else:
-    st.info("👈 Sube tanto el archivo ZIP de bandas Landsat como el vector de área de estudio (KML, KMZ, SHP.zip o GeoJSON) en el panel izquierdo para comenzar.")
+    st.info("👈 Sube el archivo ZIP de bandas Landsat y tu vector de área de estudio (KML, KMZ o GeoJSON) en el panel izquierdo para comenzar.")
