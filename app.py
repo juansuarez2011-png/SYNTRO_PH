@@ -77,7 +77,7 @@ with st.sidebar.expander("⚙️ Parámetros Avanzados"):
 # PROCESAMIENTO Y LECTURA REAL DEL PERÍMETRO
 # ==========================================
 gdf_poly = None
-center_lat, center_lon = 10.642, -71.612  # Valor por defecto
+center_lat, center_lon = 10.642, -71.612
 
 if poly_file is not None:
     try:
@@ -86,7 +86,6 @@ if poly_file is not None:
             with open(poly_path, "wb") as f:
                 f.write(poly_file.getbuffer())
             
-            # Si es un archivo zip que contiene un shp
             if poly_file.name.endswith('.zip'):
                 with zipfile.ZipFile(poly_path, 'r') as z:
                     z.extractall(tmp_poly)
@@ -96,12 +95,11 @@ if poly_file is not None:
                             break
             
             gdf_poly = gpd.read_file(poly_path)
-            # Reproyectar a WGS84 para obtener coordenadas geográficas del centroide
             gdf_wgs84 = gdf_poly.to_crs("EPSG:4326") if gdf_poly.crs else gdf_poly
             centroid = gdf_wgs84.unary_union.centroid
             center_lat, center_lon = centroid.y, centroid.x
     except Exception as e:
-        st.sidebar.error(f"Error al procesar el perímetro: {e}")
+        st.sidebar.error(f"Error al leer el perímetro: {e}")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -110,11 +108,7 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     b_status = f"✅ Banda cargada: **{band_file.name}**" if band_file else "⚠️ Falta archivo de bandas."
-    if gdf_poly is not None:
-        p_status = f"✅ Perímetro cargado: **{poly_file.name}** ({len(gdf_poly)} elemento(s) detectado(s))"
-    else:
-        p_status = "⚠️ Falta área de estudio o archivo no válido."
-    
+    p_status = f"✅ Perímetro cargado: **{poly_file.name}**" if gdf_poly is not None else "⚠️ Falta área de estudio."
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
 with col_info2:
@@ -163,32 +157,18 @@ if st.button("🚀 Ejecutar Procesamiento Integrado"):
             add_log("Generando reporte técnico HTML, ráster de pH y capas vectoriales de centroides.")
             timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
-            # ==========================================
-            # SECCIÓN DE DESCARGAS Y RESULTADOS
-            # ==========================================
             st.markdown("---")
             st.markdown("<div class='download-card'>", unsafe_allow_html=True)
             st.subheader("📥 Paquete de Resultados Listos para Descarga")
 
             d1, d2, d3 = st.columns(3)
-
-            mock_html = b"<html>Informe Tecnico Syntro pH Estimado</html>"
-            mock_tif = b"RASTER_TIF_OUTPUT"
-            mock_gpkg = b"GPKG_CENTROIDES_OUTPUT"
-
             with d1:
-                st.download_button("📥 Informe HTML", mock_html, "INFORME_TECNICO_PH.html", "text/html")
+                st.download_button("📥 Informe HTML", b"<html>Informe</html>", "INFORME_TECNICO_PH.html", "text/html")
             with d2:
-                st.download_button("📥 Ráster pH (TIF)", mock_tif, "SYNTRO_PH_EST_PRO.tif", "image/tiff")
+                st.download_button("📥 Ráster pH (TIF)", b"TIF", "SYNTRO_PH_EST_PRO.tif", "image/tiff")
             with d3:
-                st.download_button("📥 Centroides (GPKG)", mock_gpkg, "SYNTRO_PH_CENTROIDES.gpkg", "application/octet-stream")
-            
+                st.download_button("📥 Centroides (GPKG)", b"GPKG", "SYNTRO_PH_CENTROIDES.gpkg", "application/octet-stream")
             st.markdown("</div>", unsafe_allow_html=True)
 
-# Mapa centrado dinámicamente en el área de estudio cargada
 st.markdown("### 🗺️ Visualización Espacial del Perímetro Cargado")
-map_df = pd.DataFrame({
-    'lat': [center_lat],
-    'lon': [center_lon]
-})
-st.map(map_df, zoom=13, latitude=center_lat, longitude=center_lon)
+st.map(pd.DataFrame({'lat': [center_lat], 'lon': [center_lon]}), zoom=13, latitude=center_lat, longitude=center_lon)
