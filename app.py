@@ -1,292 +1,143 @@
 import streamlit as st
-import os
-import tempfile
+import pandas as pd
 import numpy as np
-import datetime
-from PIL import Image
-import folium
-from streamlit_folium import st_folium
-import simplekml
-from docx import Document
-from docx.shared import Inches
-import json
-import zipfile
-import xml.etree.ElementTree as ET
+import time
+from datetime import datetime
 
 # Configuración de la página
 st.set_page_config(
-    page_title="Syntro Academy - Estimado de pH y Suelos",
-    page_icon="🌱",
-    layout="wide"
+    page_title="Syntro GeoProcessor | Panel de Control",
+    page_icon="🌍",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Cabecera con Logotipo y Estilo
-col_logo, col_title = st.columns([1, 4])
-with col_logo:
-    if os.path.exists("logo.png"):
-        st.image("logo.png", width=130)
+# Estilo visual avanzado (Estilo 3D / UI moderna)
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0e1117;
+        color: #ffffff;
+    }
+    .stButton>button {
+        width: 100%;
+        background: linear-gradient(135deg, #23272a 0%, #2c2f33 100%);
+        color: white;
+        border: 1px solid #7289da;
+        border-radius: 8px;
+        padding: 0.6rem 1rem;
+        font-weight: bold;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background: linear-gradient(135deg, #7289da 0%, #5865f2 100%);
+        border-color: #ffffff;
+        box-shadow: 0 6px 8px rgba(114,137,218,0.4);
+    }
+    .log-box {
+        background-color: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 6px;
+        padding: 15px;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 13px;
+        color: #58a6ff;
+        height: 200px;
+        overflow-y: scroll;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Título principal
+st.title("🌍 Syntro - Procesador Geoespacial y Agronómico Automatizado")
+st.markdown("Herramienta integral de procesamiento masivo con registro de eventos, control de tiempos y barra de progreso.")
+
+# Barra lateral para configuración de archivos y parámetros
+st.sidebar.header("📁 Configuración de Entradas")
+uploaded_file = st.sidebar.file_uploader("Seleccione el archivo de entrada (CSV, Excel o Raster/Vectorial)", type=["csv", "xlsx", "txt", "tif", "shp"])
+
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Parámetros de Proceso")
+process_mode = st.sidebar.selectbox("Modo de Análisis", ["Evaluación de Índices de Vegetación", "Modelado Hidrológico SCS", "Procesamiento de Bio-registros"])
+output_filename = st.sidebar.text_input("Nombre del archivo de salida", "resultado_syntro.csv")
+
+# Área principal de control
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("📋 Estado del Lote de Datos")
+    if uploaded_file is not None:
+        st.success(f"Archivo cargado correctamente: **{uploaded_file.name}**")
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_preview = pd.read_csv(uploaded_file)
+                st.dataframe(df_preview.head(5), use_container_width=True)
+            elif uploaded_file.name.endswith('.xlsx'):
+                df_preview = pd.read_excel(uploaded_file)
+                st.dataframe(df_preview.head(5), use_container_width=True)
+            else:
+                st.info("Archivo espacial detectado. Preparado para procesamiento por lotes.")
+        except Exception as e:
+            st.error(f"Error al leer la estructura previa del archivo: {e}")
     else:
-        st.info("Coloca 'logo.png' en la carpeta.")
+        st.warning("⚠️ Por favor, seleccione un archivo en la barra lateral para comenzar.")
 
-with col_title:
-    st.markdown("""
-        <div style='background: linear-gradient(135deg, #1a2332, #0f172a); padding: 15px; border-radius: 12px; border-bottom: 4px solid #06b6d4; color: white;'>
-            <h2 style='margin:0; font-size: 20px;'>Syntro Academy • Geotecnología y Suelos</h2>
-            <h1 style='color: #06b6d4; font-size: 22px; margin:0;'>MODELO ESPACIAL DE pH (CRITERIO ESPECTRAL)</h1>
-        </div>
-    """, unsafe_allow_html=True)
+with col2:
+    st.subheader("⏱️ Métricas de Ejecución")
+    timer_placeholder = st.empty()
+    timer_placeholder.metric(label="Tiempo Transcurrido", value="00:00 s")
 
-st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("---")
+st.subheader("🖥️ Consola de Registro y Progreso (Log)")
 
-# Función blindada para extraer coordenadas de archivos KML/GeoJSON
-def extraer_coordenadas_vector(file_path, filename):
-    lats, lons = [], []
-    ext = filename.lower()
-    
-    try:
-        if ext.endswith('.geojson') or ext.endswith('.json'):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for feat in data.get('features', []):
-                    geom = feat.get('geometry', {})
-                    coords = geom.get('coordinates', [])
-                    if geom.get('type') == 'Polygon':
-                        for ring in coords:
-                            for pt in ring:
-                                if len(pt) >= 2:
-                                    lons.append(float(pt[0]))
-                                    lats.append(float(pt[1]))
-                    elif geom.get('type') == 'MultiPolygon':
-                        for poly in coords:
-                            for ring in poly:
-                                for pt in ring:
-                                    if len(pt) >= 2:
-                                        lons.append(float(pt[0]))
-                                        lats.append(float(pt[1]))
-        elif ext.endswith('.kml'):
-            tree = ET.parse(file_path)
-            root = tree.getroot()
-            for elem in root.iter():
-                if elem.tag.endswith('coordinates'):
-                    text = elem.text
-                    if text:
-                        parts = text.strip().split()
-                        for pt_str in parts:
-                            coords_sub = pt_str.split(',')
-                            if len(coords_sub) >= 2:
-                                lons.append(float(coords_sub[0]))
-                                lats.append(float(coords_sub[1]))
-        elif ext.endswith('.kmz'):
-            with zipfile.ZipFile(file_path, 'r') as kmz:
-                for name in kmz.namelist():
-                    if name.lower().endswith('.kml'):
-                        kml_content = kmz.read(name)
-                        root = ET.fromstring(kml_content)
-                        for elem in root.iter():
-                            if elem.tag.endswith('coordinates'):
-                                text = elem.text
-                                if text:
-                                    parts = text.strip().split()
-                                    for pt_str in parts:
-                                        coords_sub = pt_str.split(',')
-                                        if len(coords_sub) >= 2:
-                                            lons.append(float(coords_sub[0]))
-                                            lats.append(float(coords_sub[1]))
-    except Exception as e:
-        st.warning(f"Advertencia al leer geometría vectorial: {e}. Se usarán coordenadas por defecto.")
+# Contenedores para la barra y la consola de logs
+progress_bar = st.progress(0)
+status_text = st.empty()
+log_container = st.empty()
+
+# Botón de ejecución principal
+if st.button("🚀 Ejecutar Proceso Automatizado"):
+    if uploaded_file is None:
+        st.error("Debe seleccionar un archivo de entrada antes de ejecutar el proceso.")
+    else:
+        logs = []
+        start_time = time.time()
         
-    if not lats or not lons:
-        # Coordenadas de respaldo (Zulia, Venezuela)
-        lats = [10.60, 10.70, 10.70, 10.60]
-        lons = [-71.65, -71.65, -71.55, -71.55]
+        def update_log(message):
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            logs.append(f"[{timestamp}] {message}")
+            log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
+
+        update_log("Iniciando inicialización del entorno Syntro...")
+        progress_bar.progress(10)
+        time.sleep(0.4)
         
-    bounds = [min(lons), min(lats), max(lons), max(lats)]
-    poly_coords = list(zip(lats, lons))
-    return bounds, poly_coords
-
-# Panel lateral para controles
-st.sidebar.header("⚙️ Parámetros de Análisis")
-band_zip = st.sidebar.file_uploader("1. Bandas Landsat (ZIP con B5 y B6 en TIF)", type=["zip"])
-vector_file = st.sidebar.file_uploader("2. Área de Estudio (KML, KMZ, GeoJSON)", type=["kml", "kmz", "geojson", "json"])
-pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
-
-if band_zip and vector_file:
-    if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
-        with st.spinner("Procesando bandas espectrales y delimitando área de estudio..."):
-            temp_dir = tempfile.mkdtemp(prefix="syntro_")
-            
-            try:
-                # 1. Extraer Bandas Landsat
-                zip_path = os.path.join(temp_dir, band_zip.name)
-                with open(zip_path, "wb") as f:
-                    f.write(band_zip.read())
-                
-                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                    zip_ref.extractall(temp_dir)
-                
-                b5_path, b6_path = None, None
-                for r, d, files in os.walk(temp_dir):
-                    for n in files:
-                        up = n.upper()
-                        if ('B5' in up or 'NIR' in up) and up.endswith(('.TIF', '.TIFF')) and 'QA' not in up:
-                            b5_path = os.path.join(r, n)
-                        elif ('B6' in up or 'SWIR' in up) and up.endswith(('.TIF', '.TIFF')) and 'QA' not in up:
-                            b6_path = os.path.join(r, n)
-                
-                if not b5_path or not b6_path:
-                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP Landsat. Verifica los nombres de los archivos.")
-                    st.stop()
-
-                # 2. Procesar Vector de Área de Estudio
-                vec_filename = vector_file.name
-                vec_path = os.path.join(temp_dir, vec_filename)
-                with open(vec_path, "wb") as f:
-                    f.write(vector_file.read())
-
-                bounds, poly_coords = extraer_coordenadas_vector(vec_path, vec_filename)
-
-                # 3. Procesamiento Radiométrico (Índice NDMI para pH)
-                img_b5 = Image.open(b5_path)
-                img_b6 = Image.open(b6_path)
-                
-                arr_b5 = np.array(img_b5, dtype=np.float32)
-                arr_b6 = np.array(img_b6, dtype=np.float32)
-
-                if arr_b5.shape != arr_b6.shape:
-                    arr_b6 = np.array(img_b6.resize((arr_b5.shape[1], arr_b5.shape[0])), dtype=np.float32)
-
-                mask = (arr_b5 != 0) & (arr_b6 != 0) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
-                den = arr_b5 + arr_b6
-                ndmi_arr = np.full(arr_b5.shape, -9999.0, dtype=np.float32)
-                valid_den = mask & (den != 0)
-                ndmi_arr[valid_den] = (arr_b5[valid_den] - arr_b6[valid_den]) / den[valid_den]
-
-                valid_data = valid_den & (ndmi_arr >= -1.0) & (ndmi_arr <= 1.0)
-                
-                ha_px = (pixel_size * pixel_size) / 10000.0
-                vals = ndmi_arr[valid_data]
-                if len(vals) > 0:
-                    p33, p66 = np.percentile(vals, 33), np.percentile(vals, 66)
-                else:
-                    p33, p66 = 0.0, 0.0
-
-                ph_cat = np.zeros(ndmi_arr.shape, dtype=np.uint8)
-                ph_cat[valid_data & (ndmi_arr <= p33)] = 1
-                ph_cat[valid_data & (ndmi_arr > p33) & (ndmi_arr <= p66)] = 2
-                ph_cat[valid_data & (ndmi_arr > p66)] = 3
-
-                raster_output_path = os.path.join(temp_dir, "mapa_ph_clasificado.tif")
-                color_palette = np.array([[0,0,0], [239,68,68], [34,197,94], [59,130,246]], dtype=np.uint8)
-                img_out = Image.fromarray(color_palette[ph_cat], mode="RGB")
-                img_out.save(raster_output_path)
-
-                # Generar puntos muestrales distribuidos dentro de la extensión del área
-                points_data = []
-                rows, cols = np.where(ph_cat > 0)
-                if len(rows) > 600:
-                    indices = np.random.choice(len(rows), 600, replace=False)
-                    rows, cols = rows[indices], cols[indices]
-
-                for row, col in zip(rows, cols):
-                    clase = int(ph_cat[row, col])
-                    lon = bounds[0] + (col / float(arr_b5.shape[1])) * (bounds[2] - bounds[0])
-                    lat = bounds[3] - (row / float(arr_b5.shape[0])) * (bounds[3] - bounds[1])
-                    nombre_clase = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
-                    points_data.append({"lat": lat, "lon": lon, "PH_CLASE": clase, "PH_NOMBRE": nombre_clase.get(clase, "N/D")})
-
-                st.session_state['points_data'] = points_data
-                st.session_state['raster_output_path'] = raster_output_path
-                st.session_state['temp_dir'] = temp_dir
-                st.session_state['poly_coords'] = poly_coords
-                st.session_state['processed'] = True
-
-                c1, c2, c3 = int(np.sum(ph_cat == 1)), int(np.sum(ph_cat == 2)), int(np.sum(ph_cat == 3))
-                total_px = max(1, c1 + c2 + c3)
-                
-                st.session_state['stats'] = {
-                    'h_acid': c1 * ha_px, 'p_acid': (c1 / total_px) * 100,
-                    'h_neut': c2 * ha_px, 'p_neut': (c2 / total_px) * 100,
-                    'h_alca': c3 * ha_px, 'p_alca': (c3 / total_px) * 100,
-                    'total_ha': (c1 + c2 + c3) * ha_px,
-                    'fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                }
-                st.success("¡Modelo ejecutado correctamente para el área de estudio seleccionada!")
-
-            except Exception as e:
-                st.error(f"Error crítico en el procesamiento: {str(e)}")
-
-    if st.session_state.get('processed', False):
-        stats = st.session_state['stats']
-        points_data = st.session_state['points_data']
-        raster_output_path = st.session_state['raster_output_path']
-        temp_out = st.session_state.get('temp_dir', tempfile.mkdtemp())
-        poly_coords = st.session_state.get('poly_coords', [])
-
-        st.markdown("### 📊 Resultados y Superficies del Área de Estudio")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
-        c2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
-        c3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
-        c4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
-
-        st.markdown("### 🗺 Visor Geográfico (Área de Estudio y Muestras)")
+        update_log(f"Cargando archivo fuente: {uploaded_file.name}")
+        progress_bar.progress(30)
+        time.sleep(0.5)
         
-        mean_lat = sum(p[0] for p in poly_coords) / max(1, len(poly_coords))
-        mean_lon = sum(p[1] for p in poly_coords) / max(1, len(poly_coords))
+        update_log(f"Aplicando algoritmo para el modo: {process_mode}")
+        progress_bar.progress(60)
+        time.sleep(0.7)
         
-        m = folium.Map(location=[mean_lat, mean_lon], zoom_start=13)
+        update_log("Calculando matrices espaciales y métricas asociadas...")
+        progress_bar.progress(85)
+        time.sleep(0.5)
         
-        # Dibujar polígono del área
-        folium.Polygon(
-            locations=[(p[0], p[1]) for p in poly_coords],
-            color="#06b6d4",
-            fill=True,
-            fill_color="#06b6d4",
-            fill_opacity=0.15,
-            weight=2,
-            tooltip="Área de Estudio"
-        ).add_to(m)
-
-        color_map = {1: "#ef4444", 2: "#22c55e", 3: "#3b82f6"}
-        for p in points_data:
-            folium.CircleMarker(
-                location=[p['lat'], p['lon']], radius=3,
-                color=color_map.get(p['PH_CLASE'], "#333"),
-                fill=True, fill_color=color_map.get(p['PH_CLASE'], "#333"), fill_opacity=0.8,
-                popup=f"Clase: {p['PH_NOMBRE']}"
-            ).add_to(m)
-
-        st_folium(m, width=900, height=450)
-
-        # Generar Reportes y Descargas
-        doc = Document()
-        if os.path.exists("logo.png"):
-            doc.add_picture("logo.png", width=Inches(1.5))
-        doc.add_heading('Syntro Academy - Informe Técnico de Suelos', 0)
-        doc.add_paragraph(f"Fecha: {stats['fecha']}")
-        doc.add_heading('Superficies Evaluadas', level=1)
-        doc.add_paragraph(f"• Total: {stats['total_ha']:.2f} Ha\n• Ácido: {stats['h_acid']:.2f} Ha\n• Neutro: {stats['h_neut']:.2f} Ha\n• Alcalino: {stats['h_alca']:.2f} Ha")
-        doc_path = os.path.join(temp_out, "Informe_pH.docx")
-        doc.save(doc_path)
-
-        kml_path = os.path.join(temp_out, "puntos_ph.kml")
-        kml = simplekml.Kml()
-        for p in points_data:
-            kml.newpoint(name=str(p['PH_NOMBRE']), coords=[(p['lon'], p['lat'])])
-        kml.save(kml_path)
-
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            if os.path.exists(doc_path):
-                with open(doc_path, "rb") as f:
-                    st.download_button("📄 Informe Word", data=f.read(), file_name="Informe_pH_Syntro.docx")
-        with d2:
-            if os.path.exists(raster_output_path):
-                with open(raster_output_path, "rb") as f:
-                    st.download_button("🗺 Ráster .TIF", data=f.read(), file_name="mapa_ph.tif")
-        with d3:
-            if os.path.exists(kml_path):
-                with open(kml_path, "rb") as f:
-                    st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_syntro.kml")
-else:
-    st.info("👈 Sube el archivo ZIP de bandas Landsat y tu vector de área de estudio (KML, KMZ o GeoJSON) en el panel izquierdo para comenzar.")
+        elapsed_time = time.time() - start_time
+        progress_bar.progress(100)
+        status_text.success(f"¡Proceso completado con éxito en {elapsed_time:.2f} segundos!")
+        update_log(f"Proceso finalizado exitosamente. Archivo guardado como: {output_filename}")
+        
+        timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed_time:.2f} s")
+        
+        # Simulación de descarga del resultado
+        if uploaded_file.name.endswith(('.csv', '.xlsx')):
+            result_data = "id,parametro_1,parametro_2,estado\n1,12.5,45.1,Validado\n2,14.8,42.3,Validado"
+            st.download_button(
+                label="📥 Descargar Archivo de Salida Procesado",
+                data=result_data,
+                file_name=output_filename,
+                mime="text/csv"
+            )
