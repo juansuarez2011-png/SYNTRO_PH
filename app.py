@@ -107,11 +107,9 @@ if poly_file is not None:
                 coords = geom.get("coordinates", [])
                 geom_type = geom.get("type", "")
             else:
-                # Asumir que es un Polygon o MultiPolygon directo
                 coords = data.get("coordinates", [])
                 geom = {"type": geom_type, "coordinates": coords}
 
-            # Asegurar extracción correcta de coordenadas del polígono
             poly_coords = []
             if coords:
                 try:
@@ -275,9 +273,6 @@ th {{ background:#1a2332; color:#fff; }}
         add_log("Archivos listos para descarga simultánea y exportación a GeoLibre.")
         timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
-        # ==========================================
-        # RESULTADOS Y BALANCE DE ÁREAS
-        # ==========================================
         st.markdown("---")
         st.subheader("📋 Balance de Superficie Estrictamente Confinada")
         
@@ -291,9 +286,6 @@ th {{ background:#1a2332; color:#fff; }}
         with m4:
             st.metric("Sectores Alcalinos", f"{h_alca:.2f} Ha", f"{p_alca:.1f}%")
 
-        # ==========================================
-        # SECCIÓN DE DESCARGAS SIMULTÁNEAS
-        # ==========================================
         st.markdown("---")
         st.markdown("<div class='download-card'>", unsafe_allow_html=True)
         st.subheader("📥 Descarga Simultánea de Capas para GeoLibre")
@@ -312,7 +304,7 @@ th {{ background:#1a2332; color:#fff; }}
         st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
-# MAPA BASE SATELITAL
+# MAPA BASE SATELITAL (SIN TOKEN DE MAPBOX)
 # ==========================================
 st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
@@ -334,11 +326,12 @@ if not df_points.empty:
         pitch=30,
     )
 
+    # ✅ CORRECCIÓN: Estilo gratuito de Carto (no requiere token de Mapbox)
     r = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
         tooltip={"text": "pH Celda: {ph}\nClase: {clase}\nLat: {lat}\nLon: {lon}"},
-        map_style="mapbox://styles/mapbox/satellite-streets-v11"
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
     )
 
     st.pydeck_chart(r)
