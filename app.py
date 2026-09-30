@@ -89,7 +89,7 @@ if band_zip and poly_file:
                 if gdf.crs != target_crs:
                     gdf = gdf.to_crs(target_crs)
 
-                # 3. Recortar y procesar con Rasterio (usando nodata=0 compatible con uint16)
+                # 3. Recortar y procesar con Rasterio
                 with rasterio.open(b5_path) as src_b5:
                     gdf_raster_crs = gdf.to_crs(src_b5.crs)
                     geom_raster_crs = gdf_raster_crs.unary_union
@@ -243,47 +243,55 @@ if band_zip and poly_file:
         doc_path = os.path.join(temp_out, "Informe_Tecnico_pH.docx")
         doc.save(doc_path)
 
-        # Botones de descarga organizados en columnas
+        # Rutas de archivos vectoriales y ráster
+        geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
+        gdf_points.to_file(geojson_path, driver="GeoJSON")
+
+        kml = simplekml.Kml()
+        for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
+            pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
+            pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
+        kml_path = os.path.join(temp_out, "puntos_ph.kml")
+        kml.save(kml_path)
+
+        shp_dir = os.path.join(temp_out, "shapefile")
+        os.makedirs(shp_dir, exist_ok=True)
+        shp_path = os.path.join(shp_dir, "puntos_ph.shp")
+        gdf_points.to_file(shp_path, driver="ESRI Shapefile")
+        
+        zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
+        with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
+            for root, _, files in os.walk(shp_dir):
+                for file in files:
+                    zipf.write(os.path.join(root, file), file)
+
+        # Botones de descarga leídos estrictamente como bytes para forzar las extensiones reales
         dcol1, dcol2, dcol3, dcol4, dcol5 = st.columns(5)
         
         with dcol1:
             with open(doc_path, "rb") as f:
-                st.download_button("📄 Informe Word", f, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                doc_bytes = f.read()
+            st.download_button("📄 Informe Word", data=doc_bytes, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         with dcol2:
             with open(raster_output_path, "rb") as f:
-                st.download_button("🗺️ Ráster .TIF", f, file_name="mapa_ph_clasificado.tif", mime="image/tiff")
+                tif_bytes = f.read()
+            st.download_button("🗺️ Ráster .TIF", data=tif_bytes, file_name="mapa_ph_clasificado.tif", mime="image/tiff")
 
         with dcol3:
-            geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
-            gdf_points.to_file(geojson_path, driver="GeoJSON")
             with open(geojson_path, "rb") as f:
-                st.download_button("📥 GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
+                geojson_bytes = f.read()
+            st.download_button("📥 GeoJSON", data=geojson_bytes, file_name="puntos_ph_syntro.geojson", mime="application/json")
 
         with dcol4:
-            kml = simplekml.Kml()
-            for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
-                pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
-                pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
-            kml_path = os.path.join(temp_out, "puntos_ph.kml")
-            kml.save(kml_path)
             with open(kml_path, "rb") as f:
-                st.download_button("🌎 KML Earth", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
+                kml_bytes = f.read()
+            st.download_button("🌎 KML Earth", data=kml_bytes, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
 
         with dcol5:
-            shp_dir = os.path.join(temp_out, "shapefile")
-            os.makedirs(shp_dir, exist_ok=True)
-            shp_path = os.path.join(shp_dir, "puntos_ph.shp")
-            gdf_points.to_file(shp_path, driver="ESRI Shapefile")
-            
-            zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
-            with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
-                for root, _, files in os.walk(shp_dir):
-                    for file in files:
-                        zipf.write(os.path.join(root, file), file)
-            
             with open(zip_shp_path, "rb") as f:
-                st.download_button("🗂 Shapefile .ZIP", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
+                shp_zip_bytes = f.read()
+            st.download_button("🗂 Shapefile .ZIP", data=shp_zip_bytes, file_name="puntos_ph_shapefile.zip", mime="application/zip")
 
 else:
     st.info("👈 Por favor, carga tu archivo ZIP con las bandas recortadas (B5 y B6 en TIF) y tu perímetro vectorial en la barra lateral para iniciar.")
