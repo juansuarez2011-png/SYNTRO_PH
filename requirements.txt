@@ -1,7 +1,8 @@
 streamlit
 numpy
 Pillow
-python-docx
 folium
 streamlit-folium
 simplekml
+python-docx
+shapely
