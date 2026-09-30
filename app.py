@@ -1,17 +1,17 @@
 import streamlit as st
 import os
 import tempfile
-import tarfile
-import datetime
 import numpy as np
 import rasterio
-from rasterio.warp import reproject, Resampling
+import rasterio.mask
 import geopandas as gpd
-from shapely.geometry import box, Point
+from shapely.geometry import Point
 import folium
 from streamlit_folium import st_folium
 import zipfile
 import simplekml
+import datetime
+from docx import Document
 
 # Configuración de la página
 st.set_page_config(
@@ -23,41 +23,41 @@ st.set_page_config(
 st.markdown("""
     <div style='background: linear-gradient(135deg, #1a2332, #0f172a); padding: 20px; border-radius: 12px; border-bottom: 4px solid #06b6d4; color: white; text-align: center;'>
         <h2>Syntro Academy • Geotecnología y Análisis de Suelos</h2>
-        <h1 style='color: #06b6d4; font-size: 24px;'>MODELO ESPACIAL DE pH (CRITERIAL ESPECTRAL LANDSAT 9)</h1>
+        <h1 style='color: #06b6d4; font-size: 24px;'>MODELO ESPACIAL DE pH (CRITERIAL ESPECTRAL LANDSAT)</h1>
     </div>
 <br>""", unsafe_allow_html=True)
 
 # Panel lateral para controles
 st.sidebar.header("⚙️ Parámetros de Análisis")
-tar_file = st.sidebar.file_uploader("1. Seleccionar archivo Landsat 9 (.tar)", type=["tar"])
-poly_file = st.sidebar.file_uploader("2. Seleccionar Perímetro (GeoJSON o SHP en ZIP)", type=["geojson", "zip"])
+band_zip = st.sidebar.file_uploader("1. Bandas Landsat (ZIP con B5 y B6 en TIF)", type=["zip"])
+poly_file = st.sidebar.file_uploader("2. Perímetro (GeoJSON o SHP en ZIP)", type=["geojson", "zip"])
 pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
 
-if tar_file and poly_file:
+if band_zip and poly_file:
     if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
-        with st.spinner("Procesando bandas espectrales y generando centroides..."):
+        with st.spinner("Procesando bandas espectrales, recortando y generando centroides..."):
             temp_dir = tempfile.mkdtemp(prefix="syntro_streamlit_")
             
             try:
-                # 1. Guardar y extraer archivo .tar
-                tar_path = os.path.join(temp_dir, "input.tar")
-                with open(tar_path, "wb") as f:
-                    f.write(tar_file.read())
+                # 1. Extraer el ZIP de las bandas
+                zip_path = os.path.join(temp_dir, band_zip.name)
+                with open(zip_path, "wb") as f:
+                    f.write(band_zip.read())
                 
-                with tarfile.open(tar_path, 'r:*') as tar:
-                    tar.extractall(path=temp_dir)
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
                 
                 b5_path, b6_path = None, None
                 for r, d, files in os.walk(temp_dir):
                     for n in files:
                         up = n.upper()
-                        if up.endswith(('_B5.TIF', '_B5.TIFF')) and 'QA' not in up:
+                        if ('B5' in up or 'NIR' in up) and up.endswith(('.TIF', '.TIFF')) and 'QA' not in up:
                             b5_path = os.path.join(r, n)
-                        elif up.endswith(('_B6.TIF', '_B6.TIFF')) and 'QA' not in up:
+                        elif ('B6' in up or 'SWIR' in up) and up.endswith(('.TIF', '.TIFF')) and 'QA' not in up:
                             b6_path = os.path.join(r, n)
                 
                 if not b5_path or not b6_path:
-                    st.error("No se encontraron las bandas B5 (NIR) y B6 (SWIR-1) dentro del archivo .tar.")
+                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del archivo ZIP cargado.")
                     st.stop()
 
                 # 2. Cargar Perímetro con Geopandas
@@ -73,12 +73,10 @@ if tar_file and poly_file:
                 else:
                     gdf = gpd.read_file(poly_path)
 
-                # Reproyectar a UTM si es necesario (ej: EPSG:32618)
+                # Reproyectar a UTM por defecto (ej: EPSG:32618)
                 target_crs = "EPSG:32618"
                 if gdf.crs != target_crs:
                     gdf = gdf.to_crs(target_crs)
-
-                geom_union = gdf.unary_union
 
                 # 3. Recortar y procesar con Rasterio
                 with rasterio.open(b5_path) as src_b5:
@@ -106,7 +104,7 @@ if tar_file and poly_file:
 
                 valid_data = valid_den & (ndmi_arr >= -1.0) & (ndmi_arr <= 1.0)
                 if not np.any(valid_data):
-                    st.error("No hay píxeles válidos dentro del polígono.")
+                    st.error("No hay píxeles válidos dentro del polígono evaluado.")
                     st.stop()
 
                 ha_px = abs(out_transform_b5[0] * out_transform_b5[4]) / 10000.0
@@ -151,7 +149,8 @@ if tar_file and poly_file:
                     'h_acid': c1 * ha_px, 'p_acid': (c1 / total_px) * 100,
                     'h_neut': c2 * ha_px, 'p_neut': (c2 / total_px) * 100,
                     'h_alca': c3 * ha_px, 'p_alca': (c3 / total_px) * 100,
-                    'total_ha': (c1 + c2 + c3) * ha_px
+                    'total_ha': (c1 + c2 + c3) * ha_px,
+                    'fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
                 
                 st.success("¡Modelo ejecutado con éxito!")
@@ -164,7 +163,7 @@ if tar_file and poly_file:
         stats = st.session_state['stats']
         gdf_points = st.session_state['gdf_points']
 
-        st.markdown("### 📊 Resultados y Superficies")
+        st.markdown("### 📊 Resultados y Superficies de Suelos")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
         col2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
@@ -194,41 +193,62 @@ if tar_file and poly_file:
 
         st_folium(m, width=900, height=450)
 
-        # Panel de Descargas (GeoJSON, KML, KMZ, Shapefile ZIP)
-        st.markdown("### 📥 Panel de Descarga de Puntos y Vectores")
+        # Panel de Descargas y Reportes
+        st.markdown("### 📥 Panel de Descarga de Vectores e Informes Técnicos")
         
         temp_out = tempfile.mkdtemp()
         
-        # 1. GeoJSON
-        geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
-        gdf_points.to_file(geojson_path, driver="GeoJSON")
-        with open(geojson_path, "rb") as f:
-            st.download_button("📥 Descargar GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
-
-        # 2. KML
-        kml = simplekml.Kml()
-        for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
-            pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
-            pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
-        kml_path = os.path.join(temp_out, "puntos_ph.kml")
-        kml.save(kml_path)
-        with open(kml_path, "rb") as f:
-            st.download_button("🌎 Descargar KML (Google Earth)", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
-
-        # 3. Shapefile en ZIP
-        shp_dir = os.path.join(temp_out, "shapefile")
-        os.makedirs(shp_dir, exist_ok=True)
-        shp_path = os.path.join(shp_dir, "puntos_ph.shp")
-        gdf_points.to_file(shp_path, driver="ESRI Shapefile")
+        # Generar Reporte Word (.docx)
+        doc = Document()
+        doc.add_heading('Syntro Academy - Informe Técnico de Suelos', 0)
+        doc.add_paragraph(f"Fecha de generación: {stats['fecha']}")
+        doc.add_paragraph("Modelo de Estimación Espacial de pH basado en Criterial Espectral de Sensores Remotos.")
         
-        zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
-        with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
-            for root, _, files in os.walk(shp_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), file)
+        doc.add_heading('Resumen de Superficies Evaluadas', level=1)
+        doc.add_paragraph(f"• Superficie Total Analizada: {stats['total_ha']:.2f} Hectáreas")
+        doc.add_paragraph(f"• Suelos Ácidos (< 5.5): {stats['h_acid']:.2f} Ha ({stats['p_acid']:.1f}%)")
+        doc.add_paragraph(f"• Suelos Neutros (5.5 - 6.8): {stats['h_neut']:.2f} Ha ({stats['p_neut']:.1f}%)")
+        doc.add_paragraph(f"• Suelos Alcalinos (> 6.8): {stats['h_alca']:.2f} Ha ({stats['p_alca']:.1f}%)")
         
-        with open(zip_shp_path, "rb") as f:
-            st.download_button("🗂️️ Descargar Shapefile (.ZIP)", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
+        doc_path = os.path.join(temp_out, "Informe_Tecnico_pH.docx")
+        doc.save(doc_path)
+
+        col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+        
+        with col_d1:
+            with open(doc_path, "rb") as f:
+                st.download_button("📄 Descargar Informe Word", f, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+        with col_d2:
+            geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
+            gdf_points.to_file(geojson_path, driver="GeoJSON")
+            with open(geojson_path, "rb") as f:
+                st.download_button("📥 Descargar GeoJSON", f, file_name="puntos_ph_syntro.geojson", mime="application/json")
+
+        with col_d3:
+            kml = simplekml.Kml()
+            for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
+                pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
+                pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
+            kml_path = os.path.join(temp_out, "puntos_ph.kml")
+            kml.save(kml_path)
+            with open(kml_path, "rb") as f:
+                st.download_button("🌎 Descargar KML", f, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
+
+        with col_d4:
+            shp_dir = os.path.join(temp_out, "shapefile")
+            os.makedirs(shp_dir, exist_ok=True)
+            shp_path = os.path.join(shp_dir, "puntos_ph.shp")
+            gdf_points.to_file(shp_path, driver="ESRI Shapefile")
+            
+            zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
+            with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
+                for root, _, files in os.walk(shp_dir):
+                    for file in files:
+                        zipf.write(os.path.join(root, file), file)
+            
+            with open(zip_shp_path, "rb") as f:
+                st.download_button("🗂 Descargar Shapefile", f, file_name="puntos_ph_shapefile.zip", mime="application/zip")
 
 else:
-    st.info("👈 Por favor, carga tu archivo Landsat 9 en formato .tar y tu perímetro vectorial en la barra lateral para iniciar el procesamiento.")
+    st.info("👈 Por favor, carga tu archivo ZIP con las bandas recortadas (B5 y B6 en TIF) y tu perímetro vectorial para iniciar.")
