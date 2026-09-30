@@ -27,7 +27,7 @@ with col_logo:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=130)
     else:
-        st.info("Coloca 'logo.png' en la carpeta del proyecto para visualizarlo.")
+        st.info("Coloca 'logo.png' en la carpeta del proyecto.")
 
 with col_title:
     st.markdown("""
@@ -48,6 +48,7 @@ pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0
 if band_zip and poly_file:
     if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
         with st.spinner("Procesando bandas espectrales, calculando clases y generando entregables..."):
+            # Usar una ruta temporal persistente durante la sesión
             temp_dir = tempfile.mkdtemp(prefix="syntro_streamlit_")
             
             try:
@@ -162,8 +163,10 @@ if band_zip and poly_file:
 
                 gdf_points = gpd.GeoDataFrame(points_data, crs=src_b5.crs)
                 
+                # Guardar rutas y datos en la sesión para persistencia en descargas
                 st.session_state['gdf_points'] = gdf_points
                 st.session_state['raster_output_path'] = raster_output_path
+                st.session_state['temp_dir'] = temp_dir
                 st.session_state['processed'] = True
 
                 # Estadísticas
@@ -190,6 +193,7 @@ if band_zip and poly_file:
         stats = st.session_state['stats']
         gdf_points = st.session_state['gdf_points']
         raster_output_path = st.session_state['raster_output_path']
+        temp_out = st.session_state.get('temp_dir', tempfile.mkdtemp())
 
         st.markdown("### 📊 Resultados y Superficies de Suelos")
         col1, col2, col3, col4 = st.columns(4)
@@ -224,8 +228,6 @@ if band_zip and poly_file:
         # Panel de Descargas y Reportes
         st.markdown("### 📥 Panel de Descarga de Archivos e Informes Técnicos")
         
-        temp_out = tempfile.mkdtemp()
-        
         # Generar Reporte Word (.docx)
         doc = Document()
         if os.path.exists("logo.png"):
@@ -243,55 +245,56 @@ if band_zip and poly_file:
         doc_path = os.path.join(temp_out, "Informe_Tecnico_pH.docx")
         doc.save(doc_path)
 
-        # Rutas de archivos vectoriales y ráster
+        # Rutas de archivos vectoriales
         geojson_path = os.path.join(temp_out, "puntos_ph.geojson")
-        gdf_points.to_file(geojson_path, driver="GeoJSON")
+        if not os.path.exists(geojson_path):
+            gdf_points.to_file(geojson_path, driver="GeoJSON")
 
-        kml = simplekml.Kml()
-        for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
-            pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
-            pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
         kml_path = os.path.join(temp_out, "puntos_ph.kml")
-        kml.save(kml_path)
+        if not os.path.exists(kml_path):
+            kml = simplekml.Kml()
+            for _, row in gdf_points.to_crs("EPSG:4326").iterrows():
+                pnt = kml.newpoint(name=str(row['PH_NOMBRE']), coords=[(row.geometry.x, row.geometry.y)])
+                pnt.description = f"Clase de pH: {row['PH_NOMBRE']}"
+            kml.save(kml_path)
 
-        shp_dir = os.path.join(temp_out, "shapefile")
-        os.makedirs(shp_dir, exist_ok=True)
-        shp_path = os.path.join(shp_dir, "puntos_ph.shp")
-        gdf_points.to_file(shp_path, driver="ESRI Shapefile")
-        
         zip_shp_path = os.path.join(temp_out, "puntos_ph_shp.zip")
-        with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
-            for root, _, files in os.walk(shp_dir):
-                for file in files:
-                    zipf.write(os.path.join(root, file), file)
+        if not os.path.exists(zip_shp_path):
+            shp_dir = os.path.join(temp_out, "shapefile")
+            os.makedirs(shp_dir, exist_ok=True)
+            gdf_points.to_file(os.path.join(shp_dir, "puntos_ph.shp"), driver="ESRI Shapefile")
+            with zipfile.ZipFile(zip_shp_path, 'w') as zipf:
+                for root, _, files in os.walk(shp_dir):
+                    for file in files:
+                        zipf.write(os.path.join(root, file), file)
 
-        # Botones de descarga leídos estrictamente como bytes para forzar las extensiones reales
+        # Botones de descarga leídos estrictamente como bytes para forzar las extensiones reales (.tif, .docx, etc.)
         dcol1, dcol2, dcol3, dcol4, dcol5 = st.columns(5)
         
         with dcol1:
-            with open(doc_path, "rb") as f:
-                doc_bytes = f.read()
-            st.download_button("📄 Informe Word", data=doc_bytes, file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            if os.path.exists(doc_path):
+                with open(doc_path, "rb") as f:
+                    st.download_button("📄 Informe Word", data=f.read(), file_name="Informe_pH_Syntro.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
         with dcol2:
-            with open(raster_output_path, "rb") as f:
-                tif_bytes = f.read()
-            st.download_button("🗺️ Ráster .TIF", data=tif_bytes, file_name="mapa_ph_clasificado.tif", mime="image/tiff")
+            if os.path.exists(raster_output_path):
+                with open(raster_output_path, "rb") as f:
+                    st.download_button("🗺️️ Ráster .TIF", data=f.read(), file_name="mapa_ph_clasificado.tif", mime="image/tiff")
 
         with dcol3:
-            with open(geojson_path, "rb") as f:
-                geojson_bytes = f.read()
-            st.download_button("📥 GeoJSON", data=geojson_bytes, file_name="puntos_ph_syntro.geojson", mime="application/json")
+            if os.path.exists(geojson_path):
+                with open(geojson_path, "rb") as f:
+                    st.download_button("📥 GeoJSON", data=f.read(), file_name="puntos_ph_syntro.geojson", mime="application/json")
 
         with dcol4:
-            with open(kml_path, "rb") as f:
-                kml_bytes = f.read()
-            st.download_button("🌎 KML Earth", data=kml_bytes, file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
+            if os.path.exists(kml_path):
+                with open(kml_path, "rb") as f:
+                    st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_ph_syntro.kml", mime="application/vnd.google-earth.kml+xml")
 
         with dcol5:
-            with open(zip_shp_path, "rb") as f:
-                shp_zip_bytes = f.read()
-            st.download_button("🗂 Shapefile .ZIP", data=shp_zip_bytes, file_name="puntos_ph_shapefile.zip", mime="application/zip")
+            if os.path.exists(zip_shp_path):
+                with open(zip_shp_path, "rb") as f:
+                    st.download_button("🗂 Shapefile .ZIP", data=f.read(), file_name="puntos_ph_shapefile.zip", mime="application/zip")
 
 else:
     st.info("👈 Por favor, carga tu archivo ZIP con las bandas recortadas (B5 y B6 en TIF) y tu perímetro vectorial en la barra lateral para iniciar.")
