@@ -94,28 +94,39 @@ if poly_file is not None:
             data = json.loads(string_data)
             
             coords = []
-            if data.get("type") == "FeatureCollection":
+            geom_type = data.get("type", "")
+            geom = {}
+            
+            if geom_type == "FeatureCollection":
                 if data.get("features"):
                     geom = data["features"][0].get("geometry", {})
                     coords = geom.get("coordinates", [])
-            elif data.get("type") == "Feature":
+                    geom_type = geom.get("type", "")
+            elif geom_type == "Feature":
                 geom = data.get("geometry", {})
                 coords = geom.get("coordinates", [])
+                geom_type = geom.get("type", "")
             else:
+                # Asumir que es un Polygon o MultiPolygon directo
                 coords = data.get("coordinates", [])
+                geom = {"type": geom_type, "coordinates": coords}
 
             # Asegurar extracción correcta de coordenadas del polígono
+            poly_coords = []
             if coords:
-                if geom.get("type") == "Polygon":
-                    poly_coords = coords[0]
-                elif geom.get("type") == "MultiPolygon":
-                    poly_coords = coords[0][0]
-                else:
-                    poly_coords = coords[0] if isinstance(coords, list) else []
+                try:
+                    if geom_type == "Polygon":
+                        poly_coords = coords[0] if coords else []
+                    elif geom_type == "MultiPolygon":
+                        poly_coords = coords[0][0] if coords and coords[0] else []
+                    else:
+                        poly_coords = coords[0] if isinstance(coords, list) and len(coords) > 0 else []
+                except (IndexError, TypeError):
+                    poly_coords = []
 
-                if poly_coords:
+                if poly_coords and len(poly_coords) >= 3:
                     poly_shapely = Polygon(poly_coords)
-                    if poly_shapely.is_valid:
+                    if poly_shapely.is_valid and not poly_shapely.is_empty:
                         polygon_loaded = True
                         centroid = poly_shapely.centroid
                         center_lon, center_lat = centroid.x, centroid.y
@@ -176,7 +187,7 @@ if poly_file is not None:
                         area_metrics["Neut Ha"] = c_neut * cell_ha
                         area_metrics["Alcal Ha"] = c_alca * cell_ha
     except Exception as e:
-        st.sidebar.warning(f"Aviso de lectura perimetral: Asegúrate de que el archivo sea un GeoJSON válido.")
+        st.sidebar.warning(f"Aviso de lectura perimetral: {str(e)}")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -248,9 +259,9 @@ th {{ background:#1a2332; color:#fff; }}
   <p><b>Superficie Total Evaluada:</b> {tot:.2f} Ha</p>
   <table>
     <tr><th>Categoría</th><th>Superficie (Ha)</th><th>Proporción (%)</th></tr>
-    <tr><td>Ácido (< 5.5)</td><td>{h_acid:.2f} Ha</td><td>{p_acid:.1f}%</td></tr>
+    <tr><td>Ácido (&lt; 5.5)</td><td>{h_acid:.2f} Ha</td><td>{p_acid:.1f}%</td></tr>
     <tr><td>Neutro (5.5 - 6.8)</td><td>{h_neut:.2f} Ha</td><td>{p_neut:.1f}%</td></tr>
-    <tr><td>Alcalino (> 6.8)</td><td>{h_alca:.2f} Ha</td><td>{p_alca:.1f}%</td></tr>
+    <tr><td>Alcalino (&gt; 6.8)</td><td>{h_alca:.2f} Ha</td><td>{p_alca:.1f}%</td></tr>
   </table>
 </div>
 </body>
@@ -294,7 +305,8 @@ th {{ background:#1a2332; color:#fff; }}
         with d2:
             st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string.encode('utf-8'), "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
         with d3:
-            st.download_button("📥 Centroides pH (.csv)", df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b"", "SYNTRO_CENTROIDES_PH.csv", "text/csv")
+            csv_data = df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b""
+            st.download_button("📥 Centroides pH (.csv)", csv_data, "SYNTRO_CENTROIDES_PH.csv", "text/csv")
         with d4:
             st.download_button("📥 Informe Técnico HTML", html_bytes, "INFORME_TECNICO_PH.html", "text/html")
         st.markdown("</div>", unsafe_allow_html=True)
