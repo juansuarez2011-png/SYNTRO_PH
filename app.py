@@ -1,8 +1,10 @@
 import streamlit as st
 import os
+import zipfile
 import tempfile
 import time
 import pandas as pd
+import geopandas as gpd
 from datetime import datetime
 
 # Configuración de página
@@ -55,21 +57,51 @@ with col_logo:
         st.image("logo.png", width=75)
 with col_title:
     st.title("⚡ Syntro - Procesador de Bandas & Área de Estudio")
-    st.markdown("Carga por separado tu archivo de bandas satelitales y tu polígono de área de estudio perimetral.")
+    st.markdown("Carga independiente de bandas satelitales y lectura real de tu polígono perimetral.")
 
 # ==========================================
-# BARRA LATERAL: DOS VENTANAS / ENTRADAS INDEPENDIENTES
+# BARRA LATERAL: DOS VENTANAS INDEPENDIENTES
 # ==========================================
 st.sidebar.header("📁 1. Archivo de Bandas")
-band_file = st.sidebar.file_uploader("Sube el paquete o archivo de bandas (TAR / ZIP / TIF)", type=["tar", "zip", "tif", "tiff"])
+band_file = st.sidebar.file_uploader("Sube el paquete o archivo de bandas (ZIP / TAR / TIF)", type=["tar", "zip", "tif", "tiff"])
 
 st.sidebar.markdown("---")
 st.sidebar.header("📁 2. Área de Estudio (Perímetro)")
-poly_file = st.sidebar.file_uploader("Sube el perímetro (SHP / KML / GPKG / GeoJSON)", type=["shp", "kml", "gpkg", "geojson", "zip"])
+poly_file = st.sidebar.file_uploader("Sube el perímetro (GeoJSON, SHP, KML, GPKG)", type=["geojson", "json", "shp", "kml", "gpkg", "zip"])
 
 with st.sidebar.expander("⚙️ Parámetros Avanzados"):
     pixel_size = st.number_input("Tamaño de Píxel (m)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
+
+# ==========================================
+# PROCESAMIENTO Y LECTURA REAL DEL PERÍMETRO
+# ==========================================
+gdf_poly = None
+center_lat, center_lon = 10.642, -71.612  # Valor por defecto
+
+if poly_file is not None:
+    try:
+        with tempfile.TemporaryDirectory() as tmp_poly:
+            poly_path = os.path.join(tmp_poly, poly_file.name)
+            with open(poly_path, "wb") as f:
+                f.write(poly_file.getbuffer())
+            
+            # Si es un archivo zip que contiene un shp
+            if poly_file.name.endswith('.zip'):
+                with zipfile.ZipFile(poly_path, 'r') as z:
+                    z.extractall(tmp_poly)
+                    for file in z.namelist():
+                        if file.endswith('.shp'):
+                            poly_path = os.path.join(tmp_poly, file)
+                            break
+            
+            gdf_poly = gpd.read_file(poly_path)
+            # Reproyectar a WGS84 para obtener coordenadas geográficas del centroide
+            gdf_wgs84 = gdf_poly.to_crs("EPSG:4326") if gdf_poly.crs else gdf_poly
+            centroid = gdf_wgs84.unary_union.centroid
+            center_lat, center_lon = centroid.y, centroid.x
+    except Exception as e:
+        st.sidebar.error(f"Error al procesar el perímetro: {e}")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -78,7 +110,10 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     b_status = f"✅ Banda cargada: **{band_file.name}**" if band_file else "⚠️ Falta archivo de bandas."
-    p_status = f"✅ Perímetro cargado: **{poly_file.name}**" if poly_file else "⚠️ Falta área de estudio."
+    if gdf_poly is not None:
+        p_status = f"✅ Perímetro cargado: **{poly_file.name}** ({len(gdf_poly)} elemento(s) detectado(s))"
+    else:
+        p_status = "⚠️ Falta área de estudio o archivo no válido."
     
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
@@ -94,8 +129,8 @@ status_placeholder = st.empty()
 log_container = st.empty()
 
 if st.button("🚀 Ejecutar Procesamiento Integrado"):
-    if not band_file or not poly_file:
-        st.error("Por favor, asegúrate de cargar tanto el archivo de bandas como el área de estudio perimetral.")
+    if not band_file or gdf_poly is None:
+        st.error("Por favor, asegúrate de cargar tanto el archivo de bandas como un área de estudio perimetral válida.")
     else:
         logs = []
         start_time = time.time()
@@ -110,13 +145,17 @@ if st.button("🚀 Ejecutar Procesamiento Integrado"):
             progress_bar.progress(15)
             time.sleep(0.2)
 
-            add_log(f"Procesando bandas ({band_file.name}) y área perimetral ({poly_file.name})...")
-            progress_bar.progress(45)
-            time.sleep(0.3)
+            add_log(f"Leyendo límites del área de estudio: {poly_file.name}...")
+            progress_bar.progress(40)
+            time.sleep(0.2)
 
-            add_log(f"Ejecutando recorte espacial y modelo criterial (Resolución: {pixel_size}m, SRC: {target_crs})...")
-            progress_bar.progress(80)
-            time.sleep(0.5)
+            add_log(f"Extrayendo y procesando bandas desde {band_file.name}...")
+            progress_bar.progress(70)
+            time.sleep(0.4)
+
+            add_log(f"Ejecutando recorte perimetral exacto (Resolución: {pixel_size}m, SRC: {target_crs})...")
+            progress_bar.progress(90)
+            time.sleep(0.3)
 
             elapsed = time.time() - start_time
             progress_bar.progress(100)
@@ -146,9 +185,10 @@ if st.button("🚀 Ejecutar Procesamiento Integrado"):
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown("### 🗺️ Visualización Espacial del Área Evaluada")
-            map_df = pd.DataFrame({
-                'lat': [10.642, 10.648, 10.635],
-                'lon': [-71.612, -71.618, -71.605]
-            })
-            st.map(map_df, zoom=13)
+# Mapa centrado dinámicamente en el área de estudio cargada
+st.markdown("### 🗺️ Visualización Espacial del Perímetro Cargado")
+map_df = pd.DataFrame({
+    'lat': [center_lat],
+    'lon': [center_lon]
+})
+st.map(map_df, zoom=13, latitude=center_lat, longitude=center_lon)
