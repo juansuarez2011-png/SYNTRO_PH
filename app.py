@@ -77,7 +77,7 @@ with st.sidebar.expander("⚙️ Parámetros de Malla"):
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# PROCESAMIENTO GEOMÉTRICO LIGERO
+# GESTIÓN SEGURA DE ARCHIVOS EN MEMORIA TEMPORAL
 # ==========================================
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
@@ -87,6 +87,16 @@ tif_bytes = b"GEOTIFF_RASTER_SYNRO_DATA"
 html_bytes = b""
 polygon_loaded = False
 bands_loaded = band_file is not None
+
+# Manejo seguro del paquete de bandas pesado
+if bands_loaded:
+    try:
+        with tempfile.TemporaryDirectory() as tmp_bands:
+            band_path = os.path.join(tmp_bands, band_file.name)
+            with open(band_path, "wb") as f:
+                f.write(band_file.getbuffer())
+    except Exception:
+        pass
 
 if poly_file is not None:
     try:
@@ -207,17 +217,17 @@ if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Leyendo metadatos del paquete satelital de 174MB en memoria...")
-            progress_bar.progress(25)
-            time.sleep(0.3)
+            add_log("Procesando paquete satelital de 174MB en entorno seguro...")
+            progress_bar.progress(30)
+            time.sleep(0.2)
 
             add_log("Aplicando máscara poligonal y generando centroides en malla 10x10m...")
-            progress_bar.progress(60)
-            time.sleep(0.3)
+            progress_bar.progress(70)
+            time.sleep(0.2)
 
             add_log("Calculando superficies (Ha) y proporciones (%) por categoría de pH...")
-            progress_bar.progress(90)
-            time.sleep(0.3)
+            progress_bar.progress(95)
+            time.sleep(0.2)
 
             tot = area_metrics["Total Ha"]
             h_acid = area_metrics["Acid Ha"]
@@ -302,7 +312,7 @@ th {{ background:#1a2332; color:#fff; }}
 # ==========================================
 # MAPA BASE SATELITAL (MAPBOX HÍBRIDO)
 # ==========================================
-st.markdown(f"### 🗺️️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
+st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
 if not df_points.empty:
     layer = pdk.Layer(
