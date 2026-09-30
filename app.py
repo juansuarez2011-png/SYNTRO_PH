@@ -3,10 +3,10 @@ import os
 import zipfile
 import tempfile
 import time
+import json
 import pandas as pd
 import numpy as np
-import geopandas as gpd
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon
 import pydeck as pdk
 from datetime import datetime
 
@@ -60,7 +60,7 @@ with col_logo:
         st.image("logo.png", width=75)
 with col_title:
     st.title("⚡ Syntro - Procesador Integral de Bandas & Perímetro (pH)")
-    st.markdown("Generación de malla 10x10m estrictamente confinada con exportación simultánea.")
+    st.markdown("Generación de malla 10x10m estrictamente confinada con exportación simultánea para GeoLibre.")
 
 # ==========================================
 # BARRA LATERAL: ENTRADAS INDEPENDIENTES
@@ -70,67 +70,66 @@ band_file = st.sidebar.file_uploader("Sube el archivo comprimido .ZIP o .TAR con
 
 st.sidebar.markdown("---")
 st.sidebar.header("📁 2. Área de Estudio (Perímetro)")
-poly_file = st.sidebar.file_uploader("Sube el perímetro (.shp en .zip, .geojson, .kml, .kmZ)", type=["geojson", "json", "shp", "kml", "kmz", "zip"])
+poly_file = st.sidebar.file_uploader("Sube el perímetro (.geojson, .json)", type=["geojson", "json"])
 
 with st.sidebar.expander("⚙️ Parámetros de Malla"):
     grid_size = st.number_input("Tamaño de Malla (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# PROCESAMIENTO ESPACIAL Y CONFINAMIENTO
+# PROCESAMIENTO GEOMÉTRICO PURO Y CONFINAMIENTO
 # ==========================================
-gdf_poly = None
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
 area_metrics = {"Total Ha": 0.0, "Acid Ha": 0.0, "Neut Ha": 0.0, "Alcal Ha": 0.0}
 geojson_string = "{}"
 tif_bytes = b"GEOTIFF_RASTER_SYNRO_DATA"
 html_bytes = b""
+polygon_loaded = False
 
 if poly_file is not None:
     try:
-        with tempfile.TemporaryDirectory() as tmp_poly:
-            poly_path = os.path.join(tmp_poly, poly_file.name)
-            with open(poly_path, "wb") as f:
-                f.write(poly_file.getbuffer())
-            
-            # Descomprimir si es .zip o .kmz
-            if poly_file.name.endswith(('.zip', '.kmz')):
-                with zipfile.ZipFile(poly_path, 'r') as z:
-                    z.extractall(tmp_poly)
-                    for file in z.namelist():
-                        if file.endswith(('.shp', '.geojson', '.kml')):
-                            poly_path = os.path.join(tmp_poly, file)
-                            break
-            
-            # Soporte de lectura para GeoJSON / SHP / KML
-            if poly_file.name.endswith('.kml') or 'kml' in poly_path.lower():
-                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
-                gdf_poly = gpd.read_file(poly_path, driver='KML')
-            else:
-                gdf_poly = gpd.read_file(poly_path)
+        content = poly_file.read()
+        data = json.loads(content.decode('utf-8'))
+        
+        # Extraer coordenadas del primer polígono del GeoJSON
+        coords = []
+        if data.get("type") == "FeatureCollection":
+            geom = data["features"][0]["geometry"]
+        elif data.get("type") == "Feature":
+            geom = data["geometry"]
+        else:
+            geom = data
 
-            if gdf_poly.crs is None:
-                gdf_poly.set_crs(epsg=4326, inplace=True)
-            
-            gdf_metric = gdf_poly.to_crs(epsg=32618)
-            total_area_m2 = gdf_metric.geometry.area.sum()
-            total_ha = total_area_m2 / 10000.0
+        if geom["type"] == "Polygon":
+            coords = geom["coordinates"][0]
+        elif geom["type"] == "MultiPolygon":
+            coords = geom["coordinates"][0][0]
 
-            # Creación de grilla estrictamente confinada al polígono
-            minx, miny, maxx, maxy = gdf_metric.total_bounds
-            x_coords = np.arange(minx, maxx, grid_size)
-            y_coords = np.arange(miny, maxy, grid_size)
-            poly_geom = gdf_metric.unary_union
+        if coords:
+            poly_shapely = Polygon(coords)
+            polygon_loaded = True
+            
+            # Centroide aproximado para el mapa
+            centroid = poly_shapely.centroid
+            center_lon, center_lat = centroid.x, centroid.y
+
+            # Simulación de límites métricos aproximados basados en grados (WGS84)
+            minx, miny, maxx, maxy = poly_shapely.bounds
+            # Factor de conversión aproximado de grados a metros en el trópico
+            step_deg = grid_size / 111000.0 
+            
+            lons = np.arange(minx, maxx, step_deg)
+            lats = np.arange(miny, maxy, step_deg)
             
             pts_inside = []
             np.random.seed(42)
             c_acid, c_neut, c_alca = 0, 0, 0
             
-            for x in x_coords:
-                for y in y_coords:
-                    pt = Point(x + grid_size/2, y + grid_size/2)
-                    if poly_geom.contains(pt):
+            for lon in lons:
+                for lat in lats:
+                    pt = Point(lon, lat)
+                    if poly_shapely.contains(pt):
                         ph_val = round(np.random.uniform(4.8, 8.2), 2)
                         if ph_val < 5.5:
                             color = [239, 68, 68, 200]   # Rojo (Ácido)
@@ -146,27 +145,30 @@ if poly_file is not None:
                             c_alca += 1
                             
                         pts_inside.append({
-                            'geometry': pt,
-                            'PH_VALOR': ph_val,
-                            'PH_CLASE': clase,
+                            'lat': lat,
+                            'lon': lon,
+                            'ph': ph_val,
+                            'clase': clase,
                             'color': color
                         })
 
             if pts_inside:
-                gdf_pts = gpd.GeoDataFrame(pts_inside, crs="EPSG:32618")
-                gdf_pts_wgs84 = gdf_pts.to_crs(epsg=4326)
+                df_points = pd.DataFrame(pts_inside)
                 
-                df_points = pd.DataFrame([{
-                    'lat': row.geometry.y,
-                    'lon': row.geometry.x,
-                    'ph': row.PH_VALOR,
-                    'clase': row.PH_CLASE,
-                    'color': row.color
-                } for _, row in gdf_pts_wgs84.iterrows()])
-                
-                geojson_string = gdf_pts_wgs84.to_json()
+                # Construir GeoJSON válido con los puntos confinados
+                features = []
+                for _, row in df_points.iterrows():
+                    features.append({
+                        "type": "Feature",
+                        "geometry": {"type": "Point", "coordinates": [row['lon'], row['lat']]},
+                        "properties": {"PH_VALOR": row['ph'], "PH_CLASE": row['clase']}
+                    })
+                geojson_dict = {"type": "FeatureCollection", "features": features}
+                geojson_string = json.dumps(geojson_dict)
 
             total_pts = c_acid + c_neut + c_alca
+            # Estimación de hectáreas en base al área en grados convertida a metros cuadrados
+            total_ha = poly_shapely.area * (111000 ** 2) / 10000.0
             cell_ha = (grid_size * grid_size) / 10000.0
 
             area_metrics["Total Ha"] = total_ha
@@ -174,11 +176,8 @@ if poly_file is not None:
             area_metrics["Neut Ha"] = c_neut * cell_ha
             area_metrics["Alcal Ha"] = c_alca * cell_ha
 
-            centroid_wgs = gdf_metric.to_crs(epsg=4326).unary_union.centroid
-            center_lat, center_lon = centroid_wgs.y, centroid_wgs.x
-
     except Exception as e:
-        st.sidebar.error(f"Error al procesar el perímetro: {e}")
+        st.sidebar.error(f"Error al procesar el GeoJSON: {e}")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -187,7 +186,7 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     b_status = f"✅ Bandas cargadas: **{band_file.name}**" if band_file else "⚠️ Falta paquete de bandas."
-    p_status = f"✅ Perímetro confinado: **{poly_file.name}** ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if gdf_poly is not None else "⚠️ Falta área de estudio."
+    p_status = f"✅ Perímetro confinado: ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if polygon_loaded else "⚠️ Falta área de estudio GeoJSON."
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
 with col_info2:
@@ -202,8 +201,8 @@ status_placeholder = st.empty()
 log_container = st.empty()
 
 if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
-    if not band_file or gdf_poly is None:
-        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas como el área de estudio.")
+    if not band_file or not polygon_loaded:
+        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas (.zip/.tar) como el perímetro (.geojson).")
     else:
         logs = []
         start_time = time.time()
@@ -214,11 +213,11 @@ if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Inicializando motor espacial Syntro...")
+            add_log("Inicializando motor espacial Syntro (Geometría Pura)...")
             progress_bar.progress(20)
             time.sleep(0.2)
 
-            add_log("Aplicando máscara geométrica y generando centroides en malla 10x10m...")
+            add_log("Aplicando máscara poligonal y generando centroides en malla 10x10m...")
             progress_bar.progress(50)
             time.sleep(0.3)
 
@@ -299,7 +298,7 @@ th {{ background:#1a2332; color:#fff; }}
             with d1:
                 st.download_button("📥 GeoTIFF Confinado (.tif)", tif_bytes, "SYNTRO_RASTER_CONFINADO.tif", "image/tiff")
             with d2:
-                st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string, "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
+                st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string.encode('utf-8'), "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
             with d3:
                 st.download_button("📥 Centroides pH (.csv)", df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b"", "SYNTRO_CENTROIDES_PH.csv", "text/csv")
             with d4:
@@ -307,7 +306,7 @@ th {{ background:#1a2332; color:#fff; }}
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
-# MAPA BASE SATELITAL (BING/MAPBOX HÍBRIDO)
+# MAPA BASE SATELITAL (MAPBOX HÍBRIDO)
 # ==========================================
 st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
@@ -345,4 +344,4 @@ if not df_points.empty:
         <span style="color:#3b82f6; font-weight:bold;">■ Alcalino (&gt; 6.8)</span>
     """, unsafe_allow_html=True)
 else:
-    st.info("Carga tu área de estudio perimetral en la barra lateral para desplegar la malla de centroides sobre el mapa satelital.")
+    st.info("Carga tu área de estudio perimetral en formato GeoJSON en la barra lateral para desplegar la malla de centroides sobre el mapa satelital.")
