@@ -13,7 +13,6 @@ import simplekml
 import datetime
 from docx import Document
 from docx.shared import Inches
-from PIL import Image
 
 # Configuración de la página
 st.set_page_config(
@@ -90,26 +89,26 @@ if band_zip and poly_file:
                 if gdf.crs != target_crs:
                     gdf = gdf.to_crs(target_crs)
 
-                # 3. Recortar y procesar con Rasterio
+                # 3. Recortar y procesar con Rasterio (usando nodata=0 compatible con uint16)
                 with rasterio.open(b5_path) as src_b5:
                     gdf_raster_crs = gdf.to_crs(src_b5.crs)
                     geom_raster_crs = gdf_raster_crs.unary_union
                     
                     out_image_b5, out_transform_b5 = rasterio.mask.mask(
-                        src_b5, [geom_raster_crs], crop=True, nodata=-9999
+                        src_b5, [geom_raster_crs], crop=True, nodata=0
                     )
                     meta = src_b5.meta.copy()
 
                 with rasterio.open(b6_path) as src_b6:
                     out_image_b6, _ = rasterio.mask.mask(
-                        src_b6, [geom_raster_crs], crop=True, nodata=-9999
+                        src_b6, [geom_raster_crs], crop=True, nodata=0
                     )
 
                 arr_b5 = out_image_b5[0].astype(np.float32)
                 arr_b6 = out_image_b6[0].astype(np.float32)
 
-                # Cálculo de NDMI
-                mask = (arr_b5 != -9999) & (arr_b6 != -9999) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
+                # Cálculo de NDMI excluyendo ceros
+                mask = (arr_b5 != 0) & (arr_b6 != 0) & np.isfinite(arr_b5) & np.isfinite(arr_b6)
                 den = arr_b5 + arr_b6
                 ndmi_arr = np.full(arr_b5.shape, -9999.0, dtype=np.float32)
                 valid_den = mask & (den != 0)
