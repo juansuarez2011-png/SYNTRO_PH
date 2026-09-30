@@ -2,8 +2,9 @@ streamlit
 rasterio
 geopandas
 shapely
-numpy
 folium
 streamlit-folium
 simplekml
 python-docx
+numpy
+Pillow
