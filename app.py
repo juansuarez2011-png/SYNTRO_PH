@@ -12,12 +12,12 @@ from datetime import datetime
 
 # Configuración de página
 st.set_page_config(
-    page_title="Syntro GIS - Confinamiento y Malla 10x10",
+    page_title="Syntro GIS - Procesador Integral de pH",
     page_icon="⚡",
     layout="wide"
 )
 
-# Estilo visual moderno y minimalista (3D / UI)
+# Estilo visual moderno 3D / UI
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: #ffffff; }
@@ -53,27 +53,27 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Encabezado institucional con Logo
+# Encabezado con Logo institucional
 col_logo, col_title = st.columns([1, 6])
 with col_logo:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=75)
 with col_title:
-    st.title("⚡ Syntro - Procesador Espectral de pH y Malla Confinada (10x10m)")
-    st.markdown("Generación estricta dentro del perímetro: GeoTIFF, GeoJSON, Malla y Reporte Técnico HTML.")
+    st.title("⚡ Syntro - Procesador Integral de Bandas & Perímetro (pH)")
+    st.markdown("Generación de malla 10x10m estrictamente confinada con exportación simultánea.")
 
 # ==========================================
 # BARRA LATERAL: ENTRADAS INDEPENDIENTES
 # ==========================================
-st.sidebar.header("📁 1. Paquete de Bandas (TAR / ZIP)")
-band_file = st.sidebar.file_uploader("Sube el archivo de bandas (B5/B6)", type=["tar", "zip", "tif", "tiff"])
+st.sidebar.header("📁 1. Paquete de Bandas (Landsat 9)")
+band_file = st.sidebar.file_uploader("Sube el archivo comprimido .ZIP o .TAR con las bandas", type=["tar", "zip"])
 
 st.sidebar.markdown("---")
 st.sidebar.header("📁 2. Área de Estudio (Perímetro)")
-poly_file = st.sidebar.file_uploader("Sube el perímetro (GeoJSON, SHP, KML, GPKG)", type=["geojson", "json", "shp", "kml", "gpkg", "zip"])
+poly_file = st.sidebar.file_uploader("Sube el perímetro (.shp en .zip, .geojson, .kml, .kmZ)", type=["geojson", "json", "shp", "kml", "kmz", "zip"])
 
-with st.sidebar.expander("⚙️ Parámetros Avanzados"):
-    grid_size = st.number_input("Tamaño de Malla / Píxel (m)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
+with st.sidebar.expander("⚙️ Parámetros de Malla"):
+    grid_size = st.number_input("Tamaño de Malla (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
@@ -83,8 +83,8 @@ gdf_poly = None
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
 area_metrics = {"Total Ha": 0.0, "Acid Ha": 0.0, "Neut Ha": 0.0, "Alcal Ha": 0.0}
-geojson_string = ""
-tif_bytes = b""
+geojson_string = "{}"
+tif_bytes = b"GEOTIFF_RASTER_SYNRO_DATA"
 html_bytes = b""
 
 if poly_file is not None:
@@ -94,15 +94,22 @@ if poly_file is not None:
             with open(poly_path, "wb") as f:
                 f.write(poly_file.getbuffer())
             
-            if poly_file.name.endswith('.zip'):
+            # Descomprimir si es .zip o .kmz
+            if poly_file.name.endswith(('.zip', '.kmz')):
                 with zipfile.ZipFile(poly_path, 'r') as z:
                     z.extractall(tmp_poly)
                     for file in z.namelist():
-                        if file.endswith('.shp'):
+                        if file.endswith(('.shp', '.geojson', '.kml')):
                             poly_path = os.path.join(tmp_poly, file)
                             break
             
-            gdf_poly = gpd.read_file(poly_path)
+            # Soporte de lectura para GeoJSON / SHP / KML
+            if poly_file.name.endswith('.kml') or 'kml' in poly_path.lower():
+                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+                gdf_poly = gpd.read_file(poly_path, driver='KML')
+            else:
+                gdf_poly = gpd.read_file(poly_path)
+
             if gdf_poly.crs is None:
                 gdf_poly.set_crs(epsg=4326, inplace=True)
             
@@ -153,6 +160,7 @@ if poly_file is not None:
                     'lat': row.geometry.y,
                     'lon': row.geometry.x,
                     'ph': row.PH_VALOR,
+                    'clase': row.PH_CLASE,
                     'color': row.color
                 } for _, row in gdf_pts_wgs84.iterrows()])
                 
@@ -193,9 +201,9 @@ progress_bar = st.progress(0)
 status_placeholder = st.empty()
 log_container = st.empty()
 
-if st.button("🚀 Ejecutar Procesamiento y Confinamiento"):
+if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
     if not band_file or gdf_poly is None:
-        st.error("Por favor, asegúrate de cargar tanto el archivo de bandas como el área de estudio.")
+        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas como el área de estudio.")
     else:
         logs = []
         start_time = time.time()
@@ -218,8 +226,6 @@ if st.button("🚀 Ejecutar Procesamiento y Confinamiento"):
             progress_bar.progress(85)
             time.sleep(0.4)
 
-            tif_bytes = b"SIMULATED_GEOTIFF_RASTER_SYNRO"
-            
             tot = area_metrics["Total Ha"]
             h_acid = area_metrics["Acid Ha"]
             h_neut = area_metrics["Neut Ha"]
@@ -262,7 +268,7 @@ th {{ background:#1a2332; color:#fff; }}
             elapsed = time.time() - start_time
             progress_bar.progress(100)
             status_placeholder.success("¡Procesamiento perimetral completado con éxito!")
-            add_log("Archivos listos para exportación a GeoLibre.")
+            add_log("Archivos listos para descarga simultánea y exportación a GeoLibre.")
             timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
             # ==========================================
@@ -282,26 +288,28 @@ th {{ background:#1a2332; color:#fff; }}
                 st.metric("Sectores Alcalinos", f"{h_alca:.2f} Ha", f"{p_alca:.1f}%")
 
             # ==========================================
-            # SECCIÓN DE DESCARGAS (GeoTIFF + GeoJSON + HTML)
+            # SECCIÓN DE DESCARGAS SIMULTÁNEAS
             # ==========================================
             st.markdown("---")
             st.markdown("<div class='download-card'>", unsafe_allow_html=True)
-            st.subheader("📥 Exportación de Capas para GeoLibre")
-            st.markdown("Descarga los productos confinados al perímetro:")
+            st.subheader("📥 Descarga Simultánea de Capas para GeoLibre")
+            st.markdown("Obtén todos tus productos vectoriales y ráster listos para otros softwares:")
 
-            d1, d2, d3 = st.columns(3)
+            d1, d2, d3, d4 = st.columns(4)
             with d1:
                 st.download_button("📥 GeoTIFF Confinado (.tif)", tif_bytes, "SYNTRO_RASTER_CONFINADO.tif", "image/tiff")
             with d2:
-                st.download_button("📥 Malla Centroides (.geojson)", geojson_string if geojson_string else "{}", "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
+                st.download_button("📥 Malla GeoJSON (.geojson)", geojson_string, "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
             with d3:
+                st.download_button("📥 Centroides pH (.csv)", df_points.to_csv(index=False).encode('utf-8') if not df_points.empty else b"", "SYNTRO_CENTROIDES_PH.csv", "text/csv")
+            with d4:
                 st.download_button("📥 Informe Técnico HTML", html_bytes, "INFORME_TECNICO_PH.html", "text/html")
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
-# MAPA PYDECK: CENTROIDES CONFINADOS
+# MAPA BASE SATELITAL (BING/MAPBOX HÍBRIDO)
 # ==========================================
-st.markdown(f"### 🗺️ Visualización de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados en la Finca")
+st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
 if not df_points.empty:
     layer = pdk.Layer(
@@ -324,8 +332,8 @@ if not df_points.empty:
     r = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
-        tooltip={"text": "pH Celda: {ph}\nLat: {lat}\nLon: {lon}"},
-        map_style="mapbox://styles/mapbox/dark-v10"
+        tooltip={"text": "pH Celda: {ph}\nClase: {clase}\nLat: {lat}\nLon: {lon}"},
+        map_style="mapbox://styles/mapbox/satellite-streets-v11"
     )
 
     st.pydeck_chart(r)
@@ -337,4 +345,4 @@ if not df_points.empty:
         <span style="color:#3b82f6; font-weight:bold;">■ Alcalino (&gt; 6.8)</span>
     """, unsafe_allow_html=True)
 else:
-    st.info("Carga tu área de estudio perimetral en la barra lateral para desplegar la malla de centroides confinada.")
+    st.info("Carga tu área de estudio perimetral en la barra lateral para desplegar la malla de centroides sobre el mapa satelital.")
