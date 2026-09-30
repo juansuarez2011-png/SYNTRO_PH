@@ -9,9 +9,6 @@ import geopandas as gpd
 from shapely.geometry import Point
 import pydeck as pdk
 from datetime import datetime
-from osgeo import gdal, ogr, osr
-
-gdal.UseExceptions()
 
 # Configuración de página
 st.set_page_config(
@@ -209,7 +206,7 @@ if st.button("🚀 Ejecutar Procesamiento y Confinamiento"):
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Inicializando motor espacial Syntro (Python Puro)...")
+            add_log("Inicializando motor espacial Syntro...")
             progress_bar.progress(20)
             time.sleep(0.2)
 
@@ -221,7 +218,6 @@ if st.button("🚀 Ejecutar Procesamiento y Confinamiento"):
             progress_bar.progress(85)
             time.sleep(0.4)
 
-            # Generación de binarios reales para descarga
             tif_bytes = b"SIMULATED_GEOTIFF_RASTER_SYNRO"
             
             tot = area_metrics["Total Ha"]
