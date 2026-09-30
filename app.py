@@ -8,7 +8,7 @@ from datetime import datetime
 
 # Configuración de página
 st.set_page_config(
-    page_title="Syntro GIS Express",
+    page_title="Syntro GIS Auto-Detect",
     page_icon="⚡",
     layout="wide"
 )
@@ -49,22 +49,43 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ Syntro - Procesador Express (ZIP a GeoJSON, TIF y Shapefile)")
-st.markdown("Sube tu `.zip`, configura las bandas y selecciona el formato de tu área de estudio para procesar al instante.")
+st.title("⚡ Syntro - Procesador Automático con Detección en ZIP")
+st.markdown("Sube tu paquete `.zip`: el sistema detectará automáticamente las bandas y el área de estudio para que solo tengas que seleccionarlas.")
 
 # ==========================================
-# BARRA LATERAL: CONFIGURACIÓN MÍNIMA
+# BARRA LATERAL: CARGA Y DETECCIÓN AUTOMÁTICA
 # ==========================================
 st.sidebar.header("📁 1. Paquete Comprimido")
 zip_file = st.sidebar.file_uploader("Sube tu archivo .ZIP", type=["zip"])
 
-st.sidebar.header("🎯 2. Capas y Perímetro")
-band_1 = st.sidebar.text_input("Banda Raster 1", "Banda_5.tif")
-band_2 = st.sidebar.text_input("Banda Raster 2", "Banda_6.tif")
+# Variables por defecto si no hay zip cargado
+raster_files = []
+vector_files = []
 
-# Selector de formato para el área de estudio
-tipo_perimetro = st.sidebar.selectbox("Formato Área de Estudio", ["GeoJSON", "Shapefile (.shp)"])
-perimetro_nombre = st.sidebar.text_input("Nombre del Archivo Perimetral", "area_estudio.geojson" if tipo_perimetro == "GeoJSON" else "perimetro.shp")
+if zip_file is not None:
+    # Directorio temporal para leer el contenido del ZIP de forma instantánea
+    with tempfile.TemporaryDirectory() as temp_scan:
+        zip_path = os.path.join(temp_scan, zip_file.name)
+        with open(zip_path, "wb") as f:
+            f.write(zip_file.getbuffer())
+        
+        with zipfile.ZipFile(zip_path, 'r') as z:
+            all_names = z.namelist()
+            # Filtrar automáticamente por extensiones
+            raster_files = [f for f in all_names if f.lower().endswith(('.tif', '.tiff')) and not f.startswith('__MACOSX')]
+            vector_files = [f for f in all_names if f.lower().endswith(('.shp', '.geojson', '.json', '.kml', '.gpkg')) and not f.startswith('__MACOSX')]
+
+st.sidebar.header("🎯 2. Selección de Capas Detectadas")
+
+if zip_file is not None:
+    band_1 = st.sidebar.selectbox("Seleccionar Banda Raster 1", raster_files if raster_files else ["No se encontraron .tif"])
+    band_2 = st.sidebar.selectbox("Seleccionar Banda Raster 2", raster_files if raster_files else ["No se encontraron .tif"])
+    perimetro_file = st.sidebar.selectbox("Seleccionar Área de Estudio (Perímetro)", vector_files if vector_files else ["No se encontró vector (.shp / .geojson)"])
+else:
+    st.sidebar.info("👆 Sube un archivo .ZIP para autodetectar los archivos.")
+    band_1 = st.sidebar.text_input("Banda Raster 1", "Esperando archivo...")
+    band_2 = st.sidebar.text_input("Banda Raster 2", "Esperando archivo...")
+    perimetro_file = st.sidebar.text_input("Área de Estudio", "Esperando archivo...")
 
 prefix = st.sidebar.text_input("Prefijo de Salida", "syntro_resultado")
 
@@ -75,9 +96,9 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     if zip_file:
-        st.success(f"Archivo cargado: **{zip_file.name}** ({zip_file.size / (1024*1024):.2f} MB)")
+        st.success(f"Archivo cargado: **{zip_file.name}** | Rasters detectados: {len(raster_files)} | Vectores detectados: {len(vector_files)}")
     else:
-        st.warning("⚠️ Carga tu archivo `.zip` en la barra lateral para empezar.")
+        st.warning("⚠️ Carga tu archivo `.zip` en la barra lateral para que el sistema reconozca el contenido.")
 
 with col_info2:
     timer_placeholder = st.empty()
@@ -118,7 +139,7 @@ if st.button("🚀 Ejecutar Procesamiento"):
             with zipfile.ZipFile(zip_path, 'r') as z:
                 z.extractall(tmpdir)
             
-            add_log(f"Aplicando recorte con [{tipo_perimetro}: {perimetro_nombre}] sobre {band_1} y {band_2}...")
+            add_log(f"Aplicando recorte con área [{perimetro_file}] sobre [{band_1}] y [{band_2}]...")
             time.sleep(0.4)
             progress_bar.progress(85)
 
