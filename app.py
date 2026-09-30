@@ -8,12 +8,12 @@ from datetime import datetime
 
 # Configuración de página
 st.set_page_config(
-    page_title="Syntro GIS Auto-Detect",
+    page_title="Syntro GIS Express",
     page_icon="⚡",
     layout="wide"
 )
 
-# Estilo visual moderno y limpio (3D / UI)
+# Estilo visual moderno y minimalista (3D / UI)
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: #ffffff; }
@@ -49,21 +49,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ Syntro - Procesador Automático con Detección en ZIP")
-st.markdown("Sube tu paquete `.zip`: el sistema detectará automáticamente las bandas y el área de estudio para que solo tengas que seleccionarlas.")
+# Encabezado con Logo
+col_logo, col_title = st.columns([1, 6])
+with col_logo:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", width=75)
+with col_title:
+    st.title("⚡ Syntro - Procesador Automático Express")
+    st.markdown("Sube tu archivo `.zip`: el sistema detectará el paquete y el área de estudio de forma autónoma.")
 
 # ==========================================
-# BARRA LATERAL: CARGA Y DETECCIÓN AUTOMÁTICA
+# BARRA LATERAL: ÚNICA ENTRADA
 # ==========================================
-st.sidebar.header("📁 1. Paquete Comprimido")
+st.sidebar.header("📁 Paquete Comprimido")
 zip_file = st.sidebar.file_uploader("Sube tu archivo .ZIP", type=["zip"])
 
-# Variables por defecto si no hay zip cargado
+# Autodetección silenciosa en segundo plano
 raster_files = []
 vector_files = []
 
 if zip_file is not None:
-    # Directorio temporal para leer el contenido del ZIP de forma instantánea
     with tempfile.TemporaryDirectory() as temp_scan:
         zip_path = os.path.join(temp_scan, zip_file.name)
         with open(zip_path, "wb") as f:
@@ -71,23 +76,8 @@ if zip_file is not None:
         
         with zipfile.ZipFile(zip_path, 'r') as z:
             all_names = z.namelist()
-            # Filtrar automáticamente por extensiones
             raster_files = [f for f in all_names if f.lower().endswith(('.tif', '.tiff')) and not f.startswith('__MACOSX')]
             vector_files = [f for f in all_names if f.lower().endswith(('.shp', '.geojson', '.json', '.kml', '.gpkg')) and not f.startswith('__MACOSX')]
-
-st.sidebar.header("🎯 2. Selección de Capas Detectadas")
-
-if zip_file is not None:
-    band_1 = st.sidebar.selectbox("Seleccionar Banda Raster 1", raster_files if raster_files else ["No se encontraron .tif"])
-    band_2 = st.sidebar.selectbox("Seleccionar Banda Raster 2", raster_files if raster_files else ["No se encontraron .tif"])
-    perimetro_file = st.sidebar.selectbox("Seleccionar Área de Estudio (Perímetro)", vector_files if vector_files else ["No se encontró vector (.shp / .geojson)"])
-else:
-    st.sidebar.info("👆 Sube un archivo .ZIP para autodetectar los archivos.")
-    band_1 = st.sidebar.text_input("Banda Raster 1", "Esperando archivo...")
-    band_2 = st.sidebar.text_input("Banda Raster 2", "Esperando archivo...")
-    perimetro_file = st.sidebar.text_input("Área de Estudio", "Esperando archivo...")
-
-prefix = st.sidebar.text_input("Prefijo de Salida", "syntro_resultado")
 
 # ==========================================
 # PANEL PRINCIPAL
@@ -96,9 +86,10 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     if zip_file:
-        st.success(f"Archivo cargado: **{zip_file.name}** | Rasters detectados: {len(raster_files)} | Vectores detectados: {len(vector_files)}")
+        st.success(f"Archivo cargado: **{zip_file.name}** ({zip_file.size / (1024*1024):.2f} MB)")
+        st.info(f"🔍 Elementos reconocidos: {len(raster_files)} rasters (bandas) y {len(vector_files)} vectores (perímetro/área).")
     else:
-        st.warning("⚠️ Carga tu archivo `.zip` en la barra lateral para que el sistema reconozca el contenido.")
+        st.warning("⚠️ Sube tu archivo `.zip` en la barra lateral para comenzar.")
 
 with col_info2:
     timer_placeholder = st.empty()
@@ -111,8 +102,8 @@ progress_bar = st.progress(0)
 status_placeholder = st.empty()
 log_container = st.empty()
 
-# Botón de Ejecución
-if st.button("🚀 Ejecutar Procesamiento"):
+# Botón de Ejecución Único
+if st.button("🚀 Ejecutar Procesamiento Automatizado"):
     if not zip_file:
         st.error("Por favor, sube un archivo ZIP primero.")
     else:
@@ -139,18 +130,18 @@ if st.button("🚀 Ejecutar Procesamiento"):
             with zipfile.ZipFile(zip_path, 'r') as z:
                 z.extractall(tmpdir)
             
-            add_log(f"Aplicando recorte con área [{perimetro_file}] sobre [{band_1}] y [{band_2}]...")
+            add_log("Aplicando recorte perimetral y procesando bandas automáticamente...")
             time.sleep(0.4)
             progress_bar.progress(85)
 
             elapsed = time.time() - start_time
             progress_bar.progress(100)
             status_placeholder.success("¡Procesamiento completado con éxito!")
-            add_log("Generando archivos de salida listos.")
+            add_log("Generando archivos finales listos para descarga.")
             timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
 
             # ==========================================
-            # DESCARGAS Y MAPA
+            # SECCIÓN DE DESCARGAS Y MAPA
             # ==========================================
             st.markdown("---")
             st.markdown("<div class='download-card'>", unsafe_allow_html=True)
@@ -163,15 +154,15 @@ if st.button("🚀 Ejecutar Procesamiento"):
             mock_shp_zip = b"SHAPEFILE_ZIP_OUTPUT"
 
             with d1:
-                st.download_button("📥 GeoJSON", mock_geojson, f"{prefix}.geojson", "application/geo+json")
+                st.download_button("📥 Descargar GeoJSON", mock_geojson, "syntro_resultado.geojson", "application/geo+json")
             with d2:
-                st.download_button("📥 Raster TIF", mock_tif, f"{prefix}.tif", "image/tiff")
+                st.download_button("📥 Descargar Raster TIF", mock_tif, "syntro_resultado.tif", "image/tiff")
             with d3:
-                st.download_button("📥 Shapefile ZIP", mock_shp_zip, f"{prefix}_shp.zip", "application/zip")
+                st.download_button("📥 Descargar Shapefile", mock_shp_zip, "syntro_resultado_shp.zip", "application/zip")
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-            st.markdown("### 🗺️ Mapa Base con Puntos")
+            st.markdown("### 🗺️ Mapa Base con Puntos del Área")
             map_df = pd.DataFrame({
                 'lat': [10.642, 10.648, 10.635],
                 'lon': [-71.612, -71.618, -71.605]
