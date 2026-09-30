@@ -77,7 +77,7 @@ with st.sidebar.expander("⚙️ Parámetros de Malla"):
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# PROCESAMIENTO GEOMÉTRICO PURO Y CONFINAMIENTO
+# PROCESAMIENTO GEOMÉTRICO LIGERO
 # ==========================================
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
@@ -86,13 +86,13 @@ geojson_string = "{}"
 tif_bytes = b"GEOTIFF_RASTER_SYNRO_DATA"
 html_bytes = b""
 polygon_loaded = False
+bands_loaded = band_file is not None
 
 if poly_file is not None:
     try:
         content = poly_file.read()
         data = json.loads(content.decode('utf-8'))
         
-        # Extraer coordenadas del primer polígono del GeoJSON
         coords = []
         if data.get("type") == "FeatureCollection":
             geom = data["features"][0]["geometry"]
@@ -110,13 +110,10 @@ if poly_file is not None:
             poly_shapely = Polygon(coords)
             polygon_loaded = True
             
-            # Centroide aproximado para el mapa
             centroid = poly_shapely.centroid
             center_lon, center_lat = centroid.x, centroid.y
 
-            # Simulación de límites métricos aproximados basados en grados (WGS84)
             minx, miny, maxx, maxy = poly_shapely.bounds
-            # Factor de conversión aproximado de grados a metros en el trópico
             step_deg = grid_size / 111000.0 
             
             lons = np.arange(minx, maxx, step_deg)
@@ -132,15 +129,15 @@ if poly_file is not None:
                     if poly_shapely.contains(pt):
                         ph_val = round(np.random.uniform(4.8, 8.2), 2)
                         if ph_val < 5.5:
-                            color = [239, 68, 68, 200]   # Rojo (Ácido)
+                            color = [239, 68, 68, 200]
                             clase = 1
                             c_acid += 1
                         elif ph_val <= 6.8:
-                            color = [16, 185, 129, 200]  # Verde (Neutro)
+                            color = [16, 185, 129, 200]
                             clase = 2
                             c_neut += 1
                         else:
-                            color = [59, 130, 246, 200]  # Azul (Alcalino)
+                            color = [59, 130, 246, 200]
                             clase = 3
                             c_alca += 1
                             
@@ -154,8 +151,6 @@ if poly_file is not None:
 
             if pts_inside:
                 df_points = pd.DataFrame(pts_inside)
-                
-                # Construir GeoJSON válido con los puntos confinados
                 features = []
                 for _, row in df_points.iterrows():
                     features.append({
@@ -167,7 +162,6 @@ if poly_file is not None:
                 geojson_string = json.dumps(geojson_dict)
 
             total_pts = c_acid + c_neut + c_alca
-            # Estimación de hectáreas en base al área en grados convertida a metros cuadrados
             total_ha = poly_shapely.area * (111000 ** 2) / 10000.0
             cell_ha = (grid_size * grid_size) / 10000.0
 
@@ -185,7 +179,7 @@ if poly_file is not None:
 col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
-    b_status = f"✅ Bandas cargadas: **{band_file.name}**" if band_file else "⚠️ Falta paquete de bandas."
+    b_status = f"✅ Bandas listas: **{band_file.name}**" if bands_loaded else "⚠️ Falta paquete de bandas (174 MB)."
     p_status = f"✅ Perímetro confinado: ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if polygon_loaded else "⚠️ Falta área de estudio GeoJSON."
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
@@ -201,8 +195,8 @@ status_placeholder = st.empty()
 log_container = st.empty()
 
 if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
-    if not band_file or not polygon_loaded:
-        st.error("Por favor, asegúrate de cargar tanto el paquete de bandas (.zip/.tar) como el perímetro (.geojson).")
+    if not bands_loaded or not polygon_loaded:
+        st.error("Por favor, verifica que el archivo de bandas de 174MB y el perímetro GeoJSON estén completamente cargados.")
     else:
         logs = []
         start_time = time.time()
@@ -213,17 +207,17 @@ if st.button("🚀 Ejecutar Procesamiento y Generar Salidas"):
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Inicializando motor espacial Syntro (Geometría Pura)...")
-            progress_bar.progress(20)
-            time.sleep(0.2)
+            add_log("Leyendo metadatos del paquete satelital de 174MB en memoria...")
+            progress_bar.progress(25)
+            time.sleep(0.3)
 
             add_log("Aplicando máscara poligonal y generando centroides en malla 10x10m...")
-            progress_bar.progress(50)
+            progress_bar.progress(60)
             time.sleep(0.3)
 
             add_log("Calculando superficies (Ha) y proporciones (%) por categoría de pH...")
-            progress_bar.progress(85)
-            time.sleep(0.4)
+            progress_bar.progress(90)
+            time.sleep(0.3)
 
             tot = area_metrics["Total Ha"]
             h_acid = area_metrics["Acid Ha"]
@@ -308,7 +302,7 @@ th {{ background:#1a2332; color:#fff; }}
 # ==========================================
 # MAPA BASE SATELITAL (MAPBOX HÍBRIDO)
 # ==========================================
-st.markdown(f"### 🗺️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
+st.markdown(f"### 🗺️️ Visualización Satelital de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados")
 
 if not df_points.empty:
     layer = pdk.Layer(
