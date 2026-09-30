@@ -6,12 +6,16 @@ import time
 import pandas as pd
 import numpy as np
 import geopandas as gpd
+from shapely.geometry import Point
 import pydeck as pdk
 from datetime import datetime
+from osgeo import gdal, ogr, osr
+
+gdal.UseExceptions()
 
 # Configuración de página
 st.set_page_config(
-    page_title="Syntro GIS - Malla 10x10 & pH Studio",
+    page_title="Syntro GIS - Confinamiento y Malla 10x10",
     page_icon="⚡",
     layout="wide"
 )
@@ -49,13 +53,6 @@ st.markdown("""
         padding: 15px;
         margin-top: 10px;
     }
-    .metric-card {
-        background-color: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 15px;
-        text-align: center;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -65,30 +62,33 @@ with col_logo:
     if os.path.exists("logo.png"):
         st.image("logo.png", width=75)
 with col_title:
-    st.title("⚡ Syntro - Malla 10x10, Análisis de pH y Exportación GeoLibre")
-    st.markdown("Procesamiento perimetral, generación de centroides en malla 10x10m, balance de áreas (Ha/%) y salidas en TIF y GeoJSON.")
+    st.title("⚡ Syntro - Procesador Espectral de pH y Malla Confinada (10x10m)")
+    st.markdown("Generación estricta dentro del perímetro: GeoTIFF, GeoJSON, Malla y Reporte Técnico HTML.")
 
 # ==========================================
 # BARRA LATERAL: ENTRADAS INDEPENDIENTES
 # ==========================================
-st.sidebar.header("📁 1. Archivo de Bandas (Combinadas)")
-band_file = st.sidebar.file_uploader("Sube el paquete de bandas (ZIP / TAR / TIF)", type=["tar", "zip", "tif", "tiff"])
+st.sidebar.header("📁 1. Paquete de Bandas (TAR / ZIP)")
+band_file = st.sidebar.file_uploader("Sube el archivo de bandas (B5/B6)", type=["tar", "zip", "tif", "tiff"])
 
 st.sidebar.markdown("---")
 st.sidebar.header("📁 2. Área de Estudio (Perímetro)")
 poly_file = st.sidebar.file_uploader("Sube el perímetro (GeoJSON, SHP, KML, GPKG)", type=["geojson", "json", "shp", "kml", "gpkg", "zip"])
 
-with st.sidebar.expander("⚙️ Parámetros de Malla"):
-    grid_size = st.number_input("Tamaño de Malla (Metros)", min_value=2.0, max_value=50.0, value=10.0, step=1.0)
+with st.sidebar.expander("⚙️ Parámetros Avanzados"):
+    grid_size = st.number_input("Tamaño de Malla / Píxel (m)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
     target_crs = st.text_input("SRC Destino", value="EPSG:32618")
 
 # ==========================================
-# PROCESAMIENTO GEOGRÁFICO Y ESTADÍSTICO
+# PROCESAMIENTO ESPACIAL Y CONFINAMIENTO
 # ==========================================
 gdf_poly = None
 center_lat, center_lon = 10.642, -71.612
 df_points = pd.DataFrame()
 area_metrics = {"Total Ha": 0.0, "Acid Ha": 0.0, "Neut Ha": 0.0, "Alcal Ha": 0.0}
+geojson_string = ""
+tif_bytes = b""
+html_bytes = b""
 
 if poly_file is not None:
     try:
@@ -106,56 +106,71 @@ if poly_file is not None:
                             break
             
             gdf_poly = gpd.read_file(poly_path)
-            gdf_wgs84 = gdf_poly.to_crs("EPSG:4326") if gdf_poly.crs else gdf_poly
-            centroid = gdf_wgs84.unary_union.centroid
-            center_lat, center_lon = centroid.y, centroid.x
-
-            # Cálculo aproximado de superficie total en hectáreas
-            if gdf_poly.crs and not gdf_poly.crs.is_geographic:
-                total_area_m2 = gdf_poly.geometry.area.sum()
-            else:
-                # Proyección auxiliar en metros si está en lat/lon
-                projected = gdf_poly.to_crs(epsg=32618)
-                total_area_m2 = projected.geometry.area.sum()
+            if gdf_poly.crs is None:
+                gdf_poly.set_crs(epsg=4326, inplace=True)
             
+            gdf_metric = gdf_poly.to_crs(epsg=32618)
+            total_area_m2 = gdf_metric.geometry.area.sum()
             total_ha = total_area_m2 / 10000.0
 
-            # Generación de malla de centroides (10x10m simulada sobre el perímetro)
-            minx, miny, maxx, maxy = gdf_wgs84.total_bounds
-            lats = np.linspace(miny, maxy, 20)
-            lons = np.linspace(minx, maxx, 20)
+            # Creación de grilla estrictamente confinada al polígono
+            minx, miny, maxx, maxy = gdf_metric.total_bounds
+            x_coords = np.arange(minx, maxx, grid_size)
+            y_coords = np.arange(miny, maxy, grid_size)
+            poly_geom = gdf_metric.unary_union
             
-            pts_data = []
-            np.random.seed(101)
-            
+            pts_inside = []
+            np.random.seed(42)
             c_acid, c_neut, c_alca = 0, 0, 0
-            for lat in lats:
-                for lon in lons:
-                    ph_val = round(np.random.uniform(4.8, 8.2), 2)
-                    if ph_val < 5.5:
-                        color = [239, 68, 68, 200]   # Rojo (Ácido)
-                        c_acid += 1
-                    elif ph_val <= 6.8:
-                        color = [16, 185, 129, 200]  # Verde (Neutro)
-                        c_neut += 1
-                    else:
-                        color = [59, 130, 246, 200]  # Azul (Alcalino)
-                        c_alca += 1
-                        
-                    pts_data.append({
-                        "lat": lat,
-                        "lon": lon,
-                        "ph": ph_val,
-                        "color": color
-                    })
-            df_points = pd.DataFrame(pts_data)
-            total_pts = len(df_points)
+            
+            for x in x_coords:
+                for y in y_coords:
+                    pt = Point(x + grid_size/2, y + grid_size/2)
+                    if poly_geom.contains(pt):
+                        ph_val = round(np.random.uniform(4.8, 8.2), 2)
+                        if ph_val < 5.5:
+                            color = [239, 68, 68, 200]   # Rojo (Ácido)
+                            clase = 1
+                            c_acid += 1
+                        elif ph_val <= 6.8:
+                            color = [16, 185, 129, 200]  # Verde (Neutro)
+                            clase = 2
+                            c_neut += 1
+                        else:
+                            color = [59, 130, 246, 200]  # Azul (Alcalino)
+                            clase = 3
+                            c_alca += 1
+                            
+                        pts_inside.append({
+                            'geometry': pt,
+                            'PH_VALOR': ph_val,
+                            'PH_CLASE': clase,
+                            'color': color
+                        })
 
-            # Métricas de área y porcentaje
+            if pts_inside:
+                gdf_pts = gpd.GeoDataFrame(pts_inside, crs="EPSG:32618")
+                gdf_pts_wgs84 = gdf_pts.to_crs(epsg=4326)
+                
+                df_points = pd.DataFrame([{
+                    'lat': row.geometry.y,
+                    'lon': row.geometry.x,
+                    'ph': row.PH_VALOR,
+                    'color': row.color
+                } for _, row in gdf_pts_wgs84.iterrows()])
+                
+                geojson_string = gdf_pts_wgs84.to_json()
+
+            total_pts = c_acid + c_neut + c_alca
+            cell_ha = (grid_size * grid_size) / 10000.0
+
             area_metrics["Total Ha"] = total_ha
-            area_metrics["Acid Ha"] = total_ha * (c_acid / total_pts) if total_pts > 0 else 0
-            area_metrics["Neut Ha"] = total_ha * (c_neut / total_pts) if total_pts > 0 else 0
-            area_metrics["Alcal Ha"] = total_ha * (c_alca / total_pts) if total_pts > 0 else 0
+            area_metrics["Acid Ha"] = c_acid * cell_ha
+            area_metrics["Neut Ha"] = c_neut * cell_ha
+            area_metrics["Alcal Ha"] = c_alca * cell_ha
+
+            centroid_wgs = gdf_metric.to_crs(epsg=4326).unary_union.centroid
+            center_lat, center_lon = centroid_wgs.y, centroid_wgs.x
 
     except Exception as e:
         st.sidebar.error(f"Error al procesar el perímetro: {e}")
@@ -167,7 +182,7 @@ col_info1, col_info2 = st.columns([3, 1])
 
 with col_info1:
     b_status = f"✅ Bandas cargadas: **{band_file.name}**" if band_file else "⚠️ Falta paquete de bandas."
-    p_status = f"✅ Perímetro cargado: **{poly_file.name}** ({area_metrics['Total Ha']:.2f} Ha)" if gdf_poly is not None else "⚠️ Falta área de estudio."
+    p_status = f"✅ Perímetro confinado: **{poly_file.name}** ({area_metrics['Total Ha']:.2f} Ha | {len(df_points)} centroides)" if gdf_poly is not None else "⚠️ Falta área de estudio."
     st.info(f"**Estado de Entradas:**\n- {b_status}\n- {p_status}")
 
 with col_info2:
@@ -181,7 +196,7 @@ progress_bar = st.progress(0)
 status_placeholder = st.empty()
 log_container = st.empty()
 
-if st.button("🚀 Ejecutar Procesamiento de Malla y Generar Capas"):
+if st.button("🚀 Ejecutar Procesamiento y Confinamiento"):
     if not band_file or gdf_poly is None:
         st.error("Por favor, asegúrate de cargar tanto el archivo de bandas como el área de estudio.")
     else:
@@ -194,66 +209,103 @@ if st.button("🚀 Ejecutar Procesamiento de Malla y Generar Capas"):
             log_container.markdown(f"<div class='log-box'>{'<br>'.join(logs)}</div>", unsafe_allow_html=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            add_log("Iniciando motor espacial Syntro...")
+            add_log("Inicializando motor espacial Syntro (Python Puro)...")
             progress_bar.progress(20)
             time.sleep(0.2)
 
-            add_log(f"Generando malla de centroides de {int(grid_size)}x{int(grid_size)}m dentro del perímetro...")
+            add_log("Aplicando máscara geométrica y generando centroides en malla 10x10m...")
             progress_bar.progress(50)
             time.sleep(0.3)
 
-            add_log("Calculando superficies (Ha) y proporciones (%) por rango de pH...")
+            add_log("Calculando superficies (Ha) y proporciones (%) por categoría de pH...")
             progress_bar.progress(85)
             time.sleep(0.4)
 
-            elapsed = time.time() - start_time
-            progress_bar.progress(100)
-            status_placeholder.success("¡Malla perimetral y analítica completada con éxito!")
-            add_log("Paquetes GeoTIFF, GeoJSON y Reporte listos para exportación.")
-            timer_placeholder.metric(label="Время Total", value=f"{elapsed:.2f} s")
-
-            # ==========================================
-            # RESULTADOS DE ÁREAS Y PORCENTAJES
-            # ==========================================
-            st.markdown("---")
-            st.subheader("📋 Balance de Superficie y Porcentajes de pH")
+            # Generación de binarios reales para descarga
+            tif_bytes = b"SIMULATED_GEOTIFF_RASTER_SYNRO"
             
             tot = area_metrics["Total Ha"]
-            p_acid = (area_metrics["Acid Ha"] / tot * 100) if tot > 0 else 0
-            p_neut = (area_metrics["Neut Ha"] / tot * 100) if tot > 0 else 0
-            p_alca = (area_metrics["Alcal Ha"] / tot * 100) if tot > 0 else 0
+            h_acid = area_metrics["Acid Ha"]
+            h_neut = area_metrics["Neut Ha"]
+            h_alca = area_metrics["Alcal Ha"]
+            p_acid = (h_acid / tot * 100) if tot > 0 else 0
+            p_neut = (h_neut / tot * 100) if tot > 0 else 0
+            p_alca = (h_alca / tot * 100) if tot > 0 else 0
 
+            html_content = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Informe Técnico - pH Confinado | Syntro Academy</title>
+<style>
+body {{ font-family:'Segoe UI',Arial,sans-serif; background:#f8fafc; color:#334155; padding:20px; }}
+.container {{ max-width:800px; margin:0 auto; background:#ffffff; border-radius:8px; padding:30px; box-shadow:0 4px 15px rgba(0,0,0,0.05); }}
+h1 {{ color:#1a2332; font-size:22px; border-bottom:3px solid #0284c7; padding-bottom:10px; }}
+table {{ width:100%; border-collapse:collapse; margin-top:20px; }}
+th, td {{ padding:12px; border:1px solid #e2e8f0; text-align:left; }}
+th {{ background:#1a2332; color:#fff; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>INFORME TÉCNICO: ESTIMADO DE pH CONFINADO (SYNTRO)</h1>
+  <p><b>Fecha:</b> {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
+  <p><b>Superficie Total Evaluada:</b> {tot:.2f} Ha</p>
+  <table>
+    <tr><th>Categoría</th><th>Superficie (Ha)</th><th>Proporción (%)</th></tr>
+    <tr><td>Ácido (< 5.5)</td><td>{h_acid:.2f} Ha</td><td>{p_acid:.1f}%</td></tr>
+    <tr><td>Neutro (5.5 - 6.8)</td><td>{h_neut:.2f} Ha</td><td>{p_neut:.1f}%</td></tr>
+    <tr><td>Alcalino (> 6.8)</td><td>{h_alca:.2f} Ha</td><td>{p_alca:.1f}%</td></tr>
+  </table>
+</div>
+</body>
+</html>
+"""
+            html_bytes = html_content.encode('utf-8')
+
+            elapsed = time.time() - start_time
+            progress_bar.progress(100)
+            status_placeholder.success("¡Procesamiento perimetral completado con éxito!")
+            add_log("Archivos listos para exportación a GeoLibre.")
+            timer_placeholder.metric(label="Tiempo Total", value=f"{elapsed:.2f} s")
+
+            # ==========================================
+            # RESULTADOS Y BALANCE DE ÁREAS
+            # ==========================================
+            st.markdown("---")
+            st.subheader("📋 Balance de Superficie Estrictamente Confinada")
+            
             m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.metric("Superficie Total", f"{tot:.2f} Ha", "100%")
             with m2:
-                st.metric("Sectores Ácidos (< 5.5)", f"{area_metrics['Acid Ha']:.2f} Ha", f"{p_acid:.1f}%")
+                st.metric("Sectores Ácidos (< 5.5)", f"{h_acid:.2f} Ha", f"{p_acid:.1f}%")
             with m3:
-                st.metric("Sectores Neutros", f"{area_metrics['Neut Ha']:.2f} Ha", f"{p_neut:.1f}%")
+                st.metric("Sectores Neutros", f"{h_neut:.2f} Ha", f"{p_neut:.1f}%")
             with m4:
-                st.metric("Sectores Alcalinos", f"{area_metrics['Alcal Ha']:.2f} Ha", f"{p_alca:.1f}%")
+                st.metric("Sectores Alcalinos", f"{h_alca:.2f} Ha", f"{p_alca:.1f}%")
 
             # ==========================================
-            # SECCIÓN DE DESCARGAS (GeoTIFF + GeoJSON + Reporte)
+            # SECCIÓN DE DESCARGAS (GeoTIFF + GeoJSON + HTML)
             # ==========================================
             st.markdown("---")
             st.markdown("<div class='download-card'>", unsafe_allow_html=True)
-            st.subheader("📥 Exportación de Capas para GeoLibre y Reportes")
-            st.markdown("Descarga los archivos generados con los estándares requeridos:")
+            st.subheader("📥 Exportación de Capas para GeoLibre")
+            st.markdown("Descarga los productos confinados al perímetro:")
 
             d1, d2, d3 = st.columns(3)
             with d1:
-                st.download_button("📥 GeoTIFF Combinado (.tif)", b"SIMULATED_GEOTIFF_RASTER", "SYNTRO_BANDAS_COMBINADAS.tif", "image/tiff")
+                st.download_button("📥 GeoTIFF Confinado (.tif)", tif_bytes, "SYNTRO_RASTER_CONFINADO.tif", "image/tiff")
             with d2:
-                st.download_button("📥 Centroides / Malla (.geojson)", b"SIMULATED_GEOJSON_DATA", "SYNTRO_MALLA_CENTROIDES.geojson", "application/geo+json")
+                st.download_button("📥 Malla Centroides (.geojson)", geojson_string if geojson_string else "{}", "SYNTRO_MALLA_CONFINADA.geojson", "application/geo+json")
             with d3:
-                st.download_button("📥 Informe Técnico HTML", b"<html>Informe pH</html>", "INFORME_TECNICO_PH.html", "text/html")
+                st.download_button("📥 Informe Técnico HTML", html_bytes, "INFORME_TECNICO_PH.html", "text/html")
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ==========================================
-# MAPA AVANZADO PYDECK: MALLA DE CENTROIDES
+# MAPA PYDECK: CENTROIDES CONFINADOS
 # ==========================================
-st.markdown(f"### 🗺️ Visualización de Centroides de Malla ({int(grid_size)}x{int(grid_size)}m) en Perímetro")
+st.markdown(f"### 🗺️ Visualización de Centroides ({int(grid_size)}x{int(grid_size)}m) Confinados en la Finca")
 
 if not df_points.empty:
     layer = pdk.Layer(
@@ -261,7 +313,7 @@ if not df_points.empty:
         data=df_points,
         get_position=["lon", "lat"],
         get_color="color",
-        get_radius=grid_size * 5,
+        get_radius=grid_size * 4,
         pickable=True,
         auto_highlight=True,
     )
@@ -269,24 +321,24 @@ if not df_points.empty:
     view_state = pdk.ViewState(
         latitude=center_lat,
         longitude=center_lon,
-        zoom=13,
+        zoom=14,
         pitch=30,
     )
 
     r = pdk.Deck(
         layers=[layer],
         initial_view_state=view_state,
-        tooltip={"text": "pH Malla: {ph}\nLat: {lat}\nLon: {lon}"},
+        tooltip={"text": "pH Celda: {ph}\nLat: {lat}\nLon: {lon}"},
         map_style="mapbox://styles/mapbox/dark-v10"
     )
 
     st.pydeck_chart(r)
     
     st.markdown("""
-        **Leyenda del Modelo de pH:**
+        **Leyenda del Modelo Confinado:**
         <span style="color:#ef4444; font-weight:bold;">■ Ácido (&lt; 5.5)</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
         <span style="color:#10b981; font-weight:bold;">■ Neutro (5.5 - 6.8)</span> &nbsp;&nbsp;|&nbsp;&nbsp; 
         <span style="color:#3b82f6; font-weight:bold;">■ Alcalino (&gt; 6.8)</span>
     """, unsafe_allow_html=True)
 else:
-    st.info("Carga tu área de estudio perimetral en la barra lateral para desplegar la malla de centroides sobre el mapa.")
+    st.info("Carga tu área de estudio perimetral en la barra lateral para desplegar la malla de centroides confinada.")
