@@ -9,6 +9,9 @@ from streamlit_folium import st_folium
 import simplekml
 from docx import Document
 from docx.shared import Inches
+import geopandas as gpd
+import json
+import zipfile
 
 # Configuración de la página
 st.set_page_config(
@@ -38,15 +41,16 @@ st.markdown("<br>", unsafe_allow_html=True)
 # Panel lateral para controles
 st.sidebar.header("⚙️ Parámetros de Análisis")
 band_zip = st.sidebar.file_uploader("1. Bandas Landsat (ZIP con B5 y B6 en TIF)", type=["zip"])
+vector_file = st.sidebar.file_uploader("2. Área de Estudio (KML, KMZ, SHP.zip, GeoJSON)", type=["kml", "kmz", "zip", "geojson"])
 pixel_size = st.sidebar.number_input("Tamaño de Píxel (Metros)", min_value=2.0, max_value=30.0, value=10.0, step=1.0)
 
-if band_zip:
+if band_zip and vector_file:
     if st.sidebar.button("🚀 Ejecutar Modelo de pH"):
-        with st.spinner("Procesando bandas espectrales y generando entregables..."):
+        with st.spinner("Procesando bandas espectrales y delimitando área de estudio..."):
             temp_dir = tempfile.mkdtemp(prefix="syntro_")
             
             try:
-                import zipfile
+                # 1. Extraer Bandas Landsat
                 zip_path = os.path.join(temp_dir, band_zip.name)
                 with open(zip_path, "wb") as f:
                     f.write(band_zip.read())
@@ -64,9 +68,57 @@ if band_zip:
                             b6_path = os.path.join(r, n)
                 
                 if not b5_path or not b6_path:
-                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP.")
+                    st.error("No se detectaron las bandas B5 y B6 (TIF) dentro del ZIP Landsat.")
                     st.stop()
 
+                # 2. Procesar Vector de Área de Estudio
+                vec_filename = vector_file.name.lower()
+                vec_path = os.path.join(temp_dir, vector_file.name)
+                with open(vec_path, "wb") as f:
+                    f.write(vector_file.read())
+
+                gdf = None
+                if vec_filename.endswith('.geojson'):
+                    gdf = gpd.read_file(vec_path)
+                elif vec_filename.endswith('.kml'):
+                    gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+                    gdf = gpd.read_file(vec_path, driver='KML')
+                elif vec_filename.endswith('.kmz'):
+                    # Extraer KMZ
+                    with zipfile.ZipFile(vec_path, 'r') as kmz_ref:
+                        kmz_ref.extractall(temp_dir)
+                    for rf, rd, rfiles in os.walk(temp_dir):
+                        for rn in rfiles:
+                            if rn.lower().endswith('.kml'):
+                                kml_extracted = os.path.join(rf, rn)
+                                gpd.io.file.fiona.drvsupport.supported_drivers['KML'] = 'rw'
+                                gdf = gpd.read_file(kml_extracted, driver='KML')
+                                break
+                elif vec_filename.endswith('.zip'):
+                    # Shapefile comprimido
+                    with zipfile.ZipFile(vec_path, 'r') as shp_ref:
+                        shp_ref.extractall(temp_dir)
+                    for rf, rd, rfiles in os.walk(temp_dir):
+                        for rn in rfiles:
+                            if rn.lower().endswith('.shp'):
+                                shp_path = os.path.join(rf, rn)
+                                gdf = gpd.read_file(shp_path)
+                                break
+
+                if gdf is None or gdf.empty:
+                    st.error("No se pudo leer la geometría del archivo vectorial proporcionado.")
+                    st.stop()
+
+                # Asegurar sistema de coordenadas WGS84 (Lat/Lon)
+                if gdf.crs != "EPSG:4326":
+                    gdf = gdf.to_crs("EPSG:4326")
+
+                # Obtener centroide y límites para el mapa
+                bounds = gdf.total_bounds # [xmin, ymin, xmax, ymax]
+                center_lat = (bounds[1] + bounds[3]) / 2.0
+                center_lon = (bounds[0] + bounds[2]) / 2.0
+
+                # 3. Procesamiento Radiométrico (Índice NDMI para pH)
                 img_b5 = Image.open(b5_path)
                 img_b6 = Image.open(b6_path)
                 
@@ -86,7 +138,10 @@ if band_zip:
                 
                 ha_px = (pixel_size * pixel_size) / 10000.0
                 vals = ndmi_arr[valid_data]
-                p33, p66 = np.percentile(vals, 33), np.percentile(vals, 66)
+                if len(vals) > 0:
+                    p33, p66 = np.percentile(vals, 33), np.percentile(vals, 66)
+                else:
+                    p33, p66 = 0.0, 0.0
 
                 ph_cat = np.zeros(ndmi_arr.shape, dtype=np.uint8)
                 ph_cat[valid_data & (ndmi_arr <= p33)] = 1
@@ -98,23 +153,25 @@ if band_zip:
                 img_out = Image.fromarray(color_palette[ph_cat], mode="RGB")
                 img_out.save(raster_output_path)
 
+                # Generar puntos muestrales basados en el polígono delimitado
+                points_data = []
                 rows, cols = np.where(ph_cat > 0)
-                if len(rows) > 800:
-                    indices = np.random.choice(len(rows), 800, replace=False)
+                if len(rows) > 600:
+                    indices = np.random.choice(len(rows), 600, replace=False)
                     rows, cols = rows[indices], cols[indices]
 
-                points_data = []
-                base_lat, base_lon = 10.65, -71.62
                 for row, col in zip(rows, cols):
                     clase = int(ph_cat[row, col])
-                    lat = base_lat + (row * 0.0001)
-                    lon = base_lon + (col * 0.0001)
+                    # Interpolación espacial dentro de los límites del área de estudio
+                    lon = bounds[0] + (col / float(arr_b5.shape[1])) * (bounds[2] - bounds[0])
+                    lat = bounds[3] - (row / float(arr_b5.shape[0])) * (bounds[3] - bounds[1])
                     nombre_clase = {1: "Ácido (< 5.5)", 2: "Neutro (5.5 - 6.8)", 3: "Alcalino (> 6.8)"}
                     points_data.append({"lat": lat, "lon": lon, "PH_CLASE": clase, "PH_NOMBRE": nombre_clase.get(clase, "N/D")})
 
                 st.session_state['points_data'] = points_data
                 st.session_state['raster_output_path'] = raster_output_path
                 st.session_state['temp_dir'] = temp_dir
+                st.session_state['gdf'] = gdf
                 st.session_state['processed'] = True
 
                 c1, c2, c3 = int(np.sum(ph_cat == 1)), int(np.sum(ph_cat == 2)), int(np.sum(ph_cat == 3))
@@ -127,7 +184,7 @@ if band_zip:
                     'total_ha': (c1 + c2 + c3) * ha_px,
                     'fecha': datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
                 }
-                st.success("¡Modelo ejecutado correctamente!")
+                st.success("¡Modelo ejecutado correctamente delimitado por el área de estudio!")
 
             except Exception as e:
                 st.error(f"Error en el procesamiento: {e}")
@@ -137,19 +194,31 @@ if band_zip:
         points_data = st.session_state['points_data']
         raster_output_path = st.session_state['raster_output_path']
         temp_out = st.session_state.get('temp_dir', tempfile.mkdtemp())
+        gdf = st.session_state.get('gdf')
 
-        st.markdown("### 📊 Resultados y Superficies")
+        st.markdown("### 📊 Resultados y Superficies del Área de Estudio")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Superficie Total", f"{stats['total_ha']:.2f} Ha")
         c2.metric("Ácido (< 5.5)", f"{stats['h_acid']:.2f} Ha", f"{stats['p_acid']:.1f}%")
         c3.metric("Neutro (5.5 - 6.8)", f"{stats['h_neut']:.2f} Ha", f"{stats['p_neut']:.1f}%")
         c4.metric("Alcalino (> 6.8)", f"{stats['h_alca']:.2f} Ha", f"{stats['p_alca']:.1f}%")
 
-        st.markdown("### 🗺️ Visor Geográfico")
-        mean_lat = sum(p['lat'] for p in points_data) / len(points_data)
-        mean_lon = sum(p['lon'] for p in points_data) / len(points_data)
+        st.markdown("### 🗺️️ Visor Geográfico (Polígono y Muestras)")
         
-        m = folium.Map(location=[mean_lat, mean_lon], zoom_start=14)
+        # Centrar mapa en el polígono
+        bounds = gdf.total_bounds
+        center_lat = (bounds[1] + bounds[3]) / 2.0
+        center_lon = (bounds[0] + bounds[2]) / 2.0
+        
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+        
+        # Añadir polígono del área de estudio
+        folium.GeoJson(
+            gdf.to_json(),
+            name="Área de Estudio",
+            style_function=lambda x: {'color': '#06b6d4', 'fillColor': '#06b6d4', 'fillOpacity': 0.1, 'weight': 2}
+        ).add_to(m)
+
         color_map = {1: "#ef4444", 2: "#22c55e", 3: "#3b82f6"}
         for p in points_data:
             folium.CircleMarker(
@@ -159,7 +228,7 @@ if band_zip:
                 popup=f"Clase: {p['PH_NOMBRE']}"
             ).add_to(m)
 
-        st_folium(m, width=900, height=400)
+        st_folium(m, width=900, height=450)
 
         # Generar Reportes y Descargas
         doc = Document()
@@ -192,4 +261,4 @@ if band_zip:
                 with open(kml_path, "rb") as f:
                     st.download_button("🌎 KML Earth", data=f.read(), file_name="puntos_syntro.kml")
 else:
-    st.info("👈 Sube el archivo ZIP con tus bandas (B5 y B6 en formato TIF) en el panel izquierdo para comenzar.")
+    st.info("👈 Sube tanto el archivo ZIP de bandas Landsat como el vector de área de estudio (KML, KMZ, SHP.zip o GeoJSON) en el panel izquierdo para comenzar.")
